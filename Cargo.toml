@@ -1,0 +1,18 @@
+[package]
+name = "voxtype"
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.85"
+description = "KDE-first voice typing for Linux"
+repository = "https://github.com/Tinnci/voxtype"
+publish = false
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
