@@ -22,7 +22,24 @@ The session state machine owns cancellation and is the only component allowed
 to move a dictation request from idle through capture, recognition, insertion,
 and completion.
 
-## Planned Rust modules
+## System boundaries
+
+VoxType has four primary boundaries:
+
+1. **Core policy boundary**: session state, routing decisions, provider-neutral
+   audio/transcript types, error taxonomy, and privacy policy.
+2. **Desktop boundary**: KDE shortcuts, focus tracking, tray, notifications,
+   secret store, and text insertion.
+3. **Capture boundary**: microphone discovery, capture, conversion, and bounded
+   audio delivery.
+4. **Provider boundary**: credentials, network protocol, provider framing,
+   result parsing, and provider-specific diagnostics.
+
+The core chooses a provider and owns fallback policy. Providers do not call each
+other, access the desktop, insert text, or decide whether audio may be sent to a
+second service.
+
+## Planned Rust modules and packages
 
 - `domain`: session states, events, errors, policies, and provider-neutral types.
 - `audio`: PipeWire capture, format conversion, level diagnostics, and framing.
@@ -33,9 +50,26 @@ and completion.
 - `config`: XDG configuration, profiles, migrations, and secret references.
 - `app`: orchestration and lifecycle.
 
-The repository remains one crate until compile timings or ownership boundaries
-justify a workspace. Modules become crates only when they provide an actual
-incremental-compilation, feature-isolation, testing, or reuse benefit.
+The initial scaffold remains one package. Before the second real online provider
+lands, convert it to a small workspace:
+
+```text
+voxtype/
+  crates/
+    voxtype-core/             # dependency-light policy and contracts
+    voxtype-app/              # orchestration and daemon state machine
+    voxtype-desktop-kde/      # KDE/D-Bus/insertion adapter
+    voxtype-audio/            # capture and conversion adapter
+    voxtype-provider-doubao/  # unofficial protocol, isolated license/risk
+    voxtype-provider-<name>/  # another online provider
+  src/bin/
+    voxtype.rs                # thin CLI
+    voxtyped.rs               # daemon entry point
+```
+
+This is a target shape, not a requirement to create every package immediately.
+`voxtype-core` and each provider are the valuable boundaries. Tiny facade crates
+or one-trait packages are explicitly discouraged.
 
 ## Important design rules
 
@@ -51,6 +85,12 @@ incremental-compilation, feature-isolation, testing, or reuse benefit.
   channels. An async runtime is an adapter-level decision, not a domain rule.
 - No dynamic Rust plugin ABI is promised. Providers are compiled features until
   process-isolated plugins have a demonstrated need.
+- One provider handles a session by default. Parallel provider racing is off by
+  default because it duplicates audio disclosure and cost.
+- Fallback is decided before upload when possible. Replaying buffered speech to
+  a second provider requires explicit profile consent.
+- Every provider passes the same contract-test suite; multiple implementations
+  are evidence that the abstraction is real, but mocks still cover edge cases.
 
 ## Open investigations
 

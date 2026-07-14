@@ -7,6 +7,8 @@
 - Compare unprivileged KWin Wayland insertion backends.
 - Capture and resample microphone audio through PipeWire.
 - Validate a minimal Rust WebSocket/Opus ASR session with sanitized fixtures.
+- Select a second online provider with an official or stable API and run both
+  implementations through a shared provider contract test kit.
 
 Exit criterion: select one viable end-to-end KDE path without root privileges.
 
@@ -14,6 +16,8 @@ Exit criterion: select one viable end-to-end KDE path without root privileges.
 
 - Implement daemon state machine and D-Bus CLI.
 - Add PipeWire capture and the first ASR provider.
+- Extract `voxtype-core` and provider packages before integrating the second
+  production provider.
 - Implement copy-only output and structured diagnostics.
 - Add deterministic provider/audio integration tests.
 
@@ -41,4 +45,3 @@ Exit criterion: daily-use dictation across the P0 application matrix.
 - Optional transcript normalization profiles and vocabulary.
 - GNOME/other compositor adapters.
 - Evaluate native Fcitx5 engine integration and Flatpak distribution.
-

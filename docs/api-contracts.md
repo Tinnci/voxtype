@@ -165,6 +165,60 @@ Rules:
 - Provider raw JSON/protobuf is available only behind a redacted diagnostic mode.
 - A provider can be tested with in-memory audio/event fakes.
 
+### Provider registry and routing
+
+```rust
+pub struct ProviderId(String);
+
+pub trait ProviderRegistry: Send + Sync {
+    fn get(&self, id: &ProviderId) -> Option<&dyn AsrProvider>;
+    fn available(&self) -> Vec<ProviderSummary>;
+}
+
+pub trait ProviderRouter: Send + Sync {
+    fn plan(&self, request: &RecognitionRequest, health: &ProviderHealth)
+        -> Result<RoutePlan, RoutingError>;
+}
+
+pub struct RoutePlan {
+    pub primary: ProviderId,
+    pub fallbacks: Vec<ProviderId>,
+    pub replay_policy: ReplayPolicy,
+}
+
+pub enum ReplayPolicy {
+    Never,
+    BeforeAudioAccepted,
+    BufferedWithConsent,
+}
+```
+
+Routing rules:
+
+- Provider selection uses capabilities, language, configuration, availability,
+  recent health, privacy policy, and optional cost/latency preferences.
+- Provider-specific errors are normalized before the router sees them.
+- Authentication and invalid-configuration failures do not fall back silently;
+  the user must know that the configured provider is unusable.
+- Connection/unavailable/rate-limit failures may use an allowed fallback.
+- Once audio has been accepted, replay to another cloud requires the profile's
+  explicit `BufferedWithConsent` policy.
+- Parallel racing and result voting are future opt-in modes, never defaults.
+- The provider registry contains no dynamic library loading in version 0.x.
+
+### Provider contract test kit
+
+Every provider implementation must pass the same reusable tests:
+
+- advertised capabilities match accepted requests;
+- cancellation terminates send and receive paths;
+- bounded backpressure is respected;
+- partial/final ordering is normalized;
+- timeout and error categories are stable;
+- secrets and transcript content are redacted from normal diagnostics;
+- an empty or malformed provider response cannot become inserted text;
+- provider shutdown leaves the daemon ready for the next session.
+
 ## 5. Text insertion boundary
 
 ```rust
@@ -290,6 +344,10 @@ queue_chunks = 50
 provider = "doubao-unofficial"
 language = "zh-CN"
 
+[profiles.default.routing]
+fallbacks = []
+replay = "never"
+
 [providers.doubao-unofficial]
 credential = "secret-service://voxtype/doubao/default"
 response_timeout_seconds = 15
@@ -297,4 +355,3 @@ response_timeout_seconds = 15
 
 Secrets, transcripts, device registration bodies, and raw provider tokens are
 never valid configuration values.
-

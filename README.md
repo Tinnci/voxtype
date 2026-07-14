@@ -33,6 +33,7 @@ providers, desktop integration, audio capture, and text insertion replaceable.
 - [Dependency and build policy](docs/dependencies-and-builds.md)
 - [Delivery roadmap](docs/roadmap.md)
 - [ADR 0001: Rust](docs/decisions/0001-rust.md)
+- [ADR 0002: system boundaries and Cargo workspace](docs/decisions/0002-system-boundaries-and-workspace.md)
 
 ## Development
 

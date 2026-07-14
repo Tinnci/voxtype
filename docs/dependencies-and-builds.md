@@ -84,15 +84,67 @@ default desktop configuration, and each provider feature separately.
 
 ## Crate/module strategy
 
-- Start as one crate with modules to minimize orchestration and duplicate
-  monomorphization.
-- First extraction candidate: a dependency-free `voxtype-core` crate if doing so
-  lets protocol/state tests avoid linking native desktop/audio libraries.
-- Second extraction candidate: provider codec crate if fuzzing or reuse warrants
-  it.
+- Start as one crate with modules while interfaces are still moving.
+- Extract a dependency-light `voxtype-core` before adding the second real online
+  provider. It becomes the shared policy and provider-contract package.
+- Put each provider with materially different SDK, TLS, codec, licensing, or
+  protocol risk in its own package.
+- Keep providers using the same small transport stack separate at the package
+  boundary, but share only proven common helpers such as redaction and contract
+  tests. Do not create a speculative universal cloud client.
+- Extract desktop/audio native adapters when doing so lets `cargo test -p
+  voxtype-core` avoid their build scripts and system libraries.
 - Do not create a crate per trait or layer.
 - Avoid a stable Rust dynamic plugin ABI in 0.x; process-isolated providers are
   safer if third-party plugins become necessary.
+
+## What Rust can reuse during compilation
+
+Cargo does not normally reuse pieces of an already linked executable. Reuse
+happens one level earlier:
+
+- each library package is compiled to reusable metadata and `rlib` artifacts;
+- Cargo reuses unchanged artifacts for the same target, profile, feature set,
+  compiler, and relevant flags;
+- multiple binaries in one workspace can share the same compiled library
+  artifacts instead of compiling the source independently;
+- incremental compilation reuses unchanged code-generation units inside a
+  package during local edits;
+- `sccache` can reuse compilation outputs across clean worktrees or CI jobs.
+
+Therefore shared code should live in library packages, and `voxtype`/`voxtyped`
+binary targets should be thin. A `cdylib` or system shared object is not a build
+speed tool here: it introduces ABI, deployment, optimization, and debugging
+costs. Rust dynamic libraries are justified only for a runtime plugin boundary,
+not to make ordinary builds faster.
+
+Artifact reuse has exact cache keys. Changing features, `RUSTFLAGS`, target,
+profile, compiler version, or dependency versions can cause another compilation.
+Workspace commands should keep those inputs consistent. Cargo feature unification
+also means a broad `--all-features` build may compile heavier variants than a
+focused package check.
+
+## Recommended developer loops
+
+After workspace extraction:
+
+```bash
+# Fast policy/API loop; skips desktop, audio, TLS, and codecs.
+cargo test -p voxtype-core
+
+# One provider and shared contract tests only.
+cargo test -p voxtype-provider-doubao
+
+# Daemon type-check without building every optional provider.
+cargo check -p voxtype-app --features provider-doubao
+
+# Full integration only before merging.
+cargo test --workspace
+```
+
+Keep CLI and daemon entry points in one lightweight package when they use the
+same application libraries. Separate provider worker binaries only when fault,
+license, credential, or dependency isolation outweighs IPC and packaging cost.
 
 ## Compile-time practices
 
