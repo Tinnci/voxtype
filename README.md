@@ -28,6 +28,9 @@ providers, desktop integration, audio capture, and text insertion replaceable.
 
 - [Product requirements](docs/requirements.md)
 - [Architecture](docs/architecture.md)
+- [API contracts](docs/api-contracts.md)
+- [Doubao protocol analysis](docs/doubao-api-analysis.md)
+- [Dependency and build policy](docs/dependencies-and-builds.md)
 - [Delivery roadmap](docs/roadmap.md)
 - [ADR 0001: Rust](docs/decisions/0001-rust.md)
 
@@ -46,4 +49,3 @@ No source code has been ported from the reference project. Its PolyForm
 Noncommercial 1.0.0 license must be respected. The license for VoxType and the
 method used to reuse or independently implement provider protocol details must
 be decided before ASR provider code is added.
-

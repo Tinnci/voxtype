@@ -228,6 +228,23 @@ voxtype config path
 - The API exposes state changes, partial transcript events, final results, and
   diagnostic summaries.
 - D-Bus methods must reject callers outside the current user session.
+- The stable public interface uses only D-Bus scalar values, strings, arrays,
+  and string-keyed dictionaries so clients do not depend on Rust serialization.
+- Every state-changing request returns a session ID or a structured error; it
+  must not report success before the state machine accepts the transition.
+- D-Bus and CLI compatibility follows semantic versioning independently from
+  the internal Rust module layout.
+
+### R-403 API compatibility
+
+- Public D-Bus interface: `io.github.tinnci.VoxType1`.
+- Public object path: `/io/github/tinnci/VoxType1`.
+- Provider implementations are private plugins at first; no stable Rust plugin
+  ABI is promised in version 0.x.
+- Internal traits must not expose Tokio, zbus, cpal, tungstenite, PipeWire, Qt,
+  or provider-specific types.
+- API payloads carry opaque IDs rather than filesystem paths or secret values.
+- All externally visible enums include an `unknown`/forward-compatible mapping.
 
 ## 8. Privacy and security
 
@@ -348,6 +365,25 @@ fallback. Unsupported combinations must be documented rather than hidden.
 - Separate crates/modules for domain state, audio, providers, desktop adapters,
   storage, and CLI once complexity requires a workspace.
 - Provider and desktop integrations are tested behind traits.
+- Prefer ordinary functions, enums, and object-safe traits over proc-macro-heavy
+  frameworks in core code.
+- Core domain and protocol-codec modules must compile without desktop, audio,
+  networking, or async-runtime dependencies.
+
+### R-953 Dependency budget
+
+- Standard library first; every direct dependency requires a documented owner,
+  purpose, feature list, and removal strategy.
+- Default builds include only the daemon, CLI, KDE D-Bus integration, selected
+  audio backend, and one explicitly enabled provider.
+- Disable dependency default features unless they are audited and required.
+- Avoid duplicate TLS, HTTP, JSON, D-Bus, logging, and async runtime stacks.
+- Prefer small handwritten codecs for genuinely tiny stable wire formats, with
+  fuzz/property tests; do not handwrite security-sensitive codecs.
+- `cargo tree -d`, binary size, clean build time, and incremental build time are
+  release metrics.
+- A new proc-macro dependency or native build script requires justification in
+  review because both can materially increase clean builds.
 
 ### R-951 Supply chain
 
@@ -379,4 +415,3 @@ Version 0.1 is ready only when all of the following are true:
 - Microphone, network, provider, and insertion failures recover cleanly.
 - Secrets and transcripts are absent from normal logs and diagnostics.
 - Setup, privacy, licensing, and known limitations are documented.
-

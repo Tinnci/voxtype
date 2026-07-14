@@ -33,6 +33,10 @@ and completion.
 - `config`: XDG configuration, profiles, migrations, and secret references.
 - `app`: orchestration and lifecycle.
 
+The repository remains one crate until compile timings or ownership boundaries
+justify a workspace. Modules become crates only when they provide an actual
+incremental-compilation, feature-isolation, testing, or reuse benefit.
+
 ## Important design rules
 
 - Desktop and provider code depend on domain interfaces, not on each other.
@@ -41,6 +45,12 @@ and completion.
 - Text insertion is a negotiated capability with a copy-only fallback.
 - Secrets are represented by opaque references outside the secret-store module.
 - Provider-specific identifiers never become the application's core identity.
+- Core interfaces use `std` types and project-owned newtypes; adapters translate
+  third-party crate types at the boundary.
+- The MVP favors a small thread-based runtime with bounded standard-library
+  channels. An async runtime is an adapter-level decision, not a domain rule.
+- No dynamic Rust plugin ABI is promised. Providers are compiled features until
+  process-isolated plugins have a demonstrated need.
 
 ## Open investigations
 
@@ -51,4 +61,5 @@ and completion.
 4. PipeWire integration crate choice and real-time callback constraints.
 5. KWallet/Secret Service interoperability in a pure Rust process.
 6. Flatpak feasibility for global shortcuts, microphone, and insertion.
-
+7. Benchmark blocking threads versus an async runtime for the single-session
+   desktop workload before adding Tokio to the default dependency graph.

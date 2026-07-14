@@ -16,3 +16,21 @@ unsafe_code = "forbid"
 all = "warn"
 pedantic = "warn"
 
+# Keep local edit-build-test cycles small. Full debug information remains
+# available through an opt-in `debug-full` profile.
+[profile.dev]
+debug = 1
+incremental = true
+
+[profile.test]
+debug = 1
+incremental = true
+
+[profile.debug-full]
+inherits = "dev"
+debug = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
