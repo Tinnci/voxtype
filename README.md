@@ -1,13 +1,13 @@
 # VoxType
 
-VoxType is a planned KDE-first voice typing service for Linux. Press a global
+VoxType is a KDE-first voice typing service for Linux. Press a global
 shortcut, speak, and insert the recognized text into the currently focused
 application.
 
-> Status: active development. D-Bus control, PipeWire-Pulse capture, KDE shortcuts,
-> Secret Service configuration, a deterministic test provider, and an
-> OpenAI-compatible REST provider are implemented. Fcitx-native commit and the
-> Doubao adapter remain in progress.
+> Status: active development. The local Plasma/Wayland vertical slice is
+> operational; native Fcitx delivery still requires final manual application
+> matrix verification, and production provider profiles are not configured by
+> default.
 
 ## Why VoxType
 
@@ -15,16 +15,55 @@ The name describes the user-facing capability rather than a specific cloud
 provider or Home Assistant integration. The architecture will keep speech
 providers, desktop integration, audio capture, and text insertion replaceable.
 
-## Initial product direction
+## Implemented components
 
-- Rust implementation, with a small long-running desktop daemon and CLI.
-- KDE Plasma 6 and Wayland as the primary environment.
-- KDE Global Shortcuts for push-to-talk and toggle-to-talk actions.
-- Safe text insertion with explicit, observable fallback behavior.
-- Doubao ASR as the first provider, based on lessons from
-  [`doubao-asr-for-ha`](https://github.com/Tinnci/doubao-asr-for-ha).
-- Provider-neutral interfaces so local and official cloud ASR backends can be
-  added later.
+- Rust daemon and CLI over a per-user D-Bus API.
+- PipeWire-Pulse microphone capture at mono 16 kHz signed 16-bit PCM.
+- Plasma KGlobalAccel shortcuts, StatusNotifierItem tray, D-Bus menu, and
+  freedesktop notifications.
+- Focus-locked Fcitx5 native commit with secure-field rejection, plus an
+  explicit clipboard/ydotool compatibility backend.
+- OpenAI-compatible REST, deterministic mock, and isolated local-command
+  providers with fallback health tracking.
+- XDG TOML configuration and KWallet/Secret Service credential references.
+- Hardened systemd user services and user-level desktop/D-Bus packaging.
+
+## Install on Plasma 6
+
+Build and install user-owned components:
+
+```bash
+./scripts/install-user.sh
+```
+
+The native Fcitx bridge is a small C++ addon and must be installed separately
+because Fcitx loads addons from system directories:
+
+```bash
+./scripts/install-fcitx-addon.sh
+```
+
+The addon installer prints the commands needed to restart only Fcitx5. A system
+reboot is not required.
+
+Verify the complete local stack:
+
+```bash
+voxtype doctor
+voxtype fcitx-focus
+voxtype providers
+```
+
+The default profile is a local deterministic mock and does not upload audio.
+Configure a real provider in `~/.config/voxtype/config.toml`; see
+[Configuration and providers](docs/configuration.md).
+
+Default Plasma shortcuts:
+
+- `Meta+Alt+V`: start or stop dictation.
+- `Meta+Alt+Escape`: cancel dictation.
+
+Use the microphone tray item for the same actions and provider health status.
 
 ## Documents
 
@@ -43,10 +82,16 @@ providers, desktop integration, audio capture, and text insertion replaceable.
 ## Development
 
 ```bash
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo run --bin voxtyped
+```
+
+Run the same release installation path used for local integration testing:
+
+```bash
+./scripts/install-user.sh
 ```
 
 ## Licensing status
