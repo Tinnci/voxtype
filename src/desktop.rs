@@ -14,17 +14,25 @@ pub struct InsertionResult {
 #[derive(Clone, Copy, Debug)]
 pub struct ClipboardInserter {
     restore_delay: Duration,
+    restore_clipboard: bool,
 }
 
 impl Default for ClipboardInserter {
     fn default() -> Self {
         Self {
             restore_delay: Duration::from_millis(250),
+            restore_clipboard: true,
         }
     }
 }
 
 impl ClipboardInserter {
+    #[must_use]
+    pub const fn with_restore(mut self, restore_clipboard: bool) -> Self {
+        self.restore_clipboard = restore_clipboard;
+        self
+    }
+
     /// Inserts Unicode text using `wl-copy` and the existing user `ydotoold`.
     ///
     /// # Errors
@@ -43,12 +51,16 @@ impl ClipboardInserter {
         send_paste_chord()?;
         thread::sleep(self.restore_delay);
 
-        let clipboard_restored = match previous {
-            Some(contents) => write_clipboard(&contents).is_ok(),
-            None => Command::new("wl-copy")
-                .arg("--clear")
-                .status()
-                .is_ok_and(|status| status.success()),
+        let clipboard_restored = if self.restore_clipboard {
+            match previous {
+                Some(contents) => write_clipboard(&contents).is_ok(),
+                None => Command::new("wl-copy")
+                    .arg("--clear")
+                    .status()
+                    .is_ok_and(|status| status.success()),
+            }
+        } else {
+            false
         };
 
         Ok(InsertionResult {

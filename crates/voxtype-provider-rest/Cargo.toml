@@ -1,0 +1,16 @@
+[package]
+name = "voxtype-provider-rest"
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.85"
+description = "OpenAI-compatible REST transcription provider for VoxType"
+repository = "https://github.com/Tinnci/voxtype"
+publish = false
+
+[dependencies]
+serde_json = "1.0.145"
+voxtype-core = { path = "../voxtype-core" }
+zeroize = { version = "1.8.2", features = ["derive"] }
+
+[lints]
+workspace = true

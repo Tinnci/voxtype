@@ -80,4 +80,13 @@ impl<'a> Client<'a> {
     pub fn insert_test(&self, text: &str) -> zbus::Result<String> {
         self.proxy.call("InsertTest", &(text))
     }
+
+    /// Reloads and validates the daemon configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error if the configuration is unavailable or invalid.
+    pub fn reload_configuration(&self) -> zbus::Result<()> {
+        self.proxy.call("ReloadConfiguration", &())
+    }
 }

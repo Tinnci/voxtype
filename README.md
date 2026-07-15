@@ -4,8 +4,10 @@ VoxType is a planned KDE-first voice typing service for Linux. Press a global
 shortcut, speak, and insert the recognized text into the currently focused
 application.
 
-> Status: requirements and architecture phase. The current binary is only a
-> project scaffold; it does not record or transcribe audio yet.
+> Status: active development. D-Bus control, PipeWire-Pulse capture, KDE shortcuts,
+> Secret Service configuration, a deterministic test provider, and an
+> OpenAI-compatible REST provider are implemented. Fcitx-native commit and the
+> Doubao adapter remain in progress.
 
 ## Why VoxType
 
@@ -32,6 +34,7 @@ providers, desktop integration, audio capture, and text insertion replaceable.
 - [Doubao protocol analysis](docs/doubao-api-analysis.md)
 - [Dependency and build policy](docs/dependencies-and-builds.md)
 - [Local KDE input-method audit](docs/local-kde-ime-audit.md)
+- [Configuration and providers](docs/configuration.md)
 - [Delivery roadmap](docs/roadmap.md)
 - [ADR 0001: Rust](docs/decisions/0001-rust.md)
 - [ADR 0002: system boundaries and Cargo workspace](docs/decisions/0002-system-boundaries-and-workspace.md)
@@ -40,9 +43,9 @@ providers, desktop integration, audio capture, and text insertion replaceable.
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-cargo run
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
+cargo run --bin voxtyped
 ```
 
 ## Licensing status

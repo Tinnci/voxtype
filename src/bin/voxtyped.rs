@@ -7,7 +7,7 @@ use zbus::blocking::connection::Builder;
 fn main() -> Result<(), Box<dyn Error>> {
     let connection = Builder::session()?
         .name(DBUS_NAME)?
-        .serve_at(DBUS_PATH, VoxTypeDaemon::default())?
+        .serve_at(DBUS_PATH, VoxTypeDaemon::load()?)?
         .build()?;
 
     eprintln!("voxtyped ready on {DBUS_NAME}");

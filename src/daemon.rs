@@ -1,15 +1,27 @@
 //! D-Bus daemon interface.
 
-use crate::{audio::Recording, desktop::ClipboardInserter};
+use crate::{
+    audio::{Recording, RecordingResult},
+    config::{Config, ProviderConfig, lookup_secret},
+    desktop::ClipboardInserter,
+};
+use std::fs;
+use std::path::Path;
 use std::process::Command as ProcessCommand;
-use voxtype_core::{Command, CommandEffect, SessionId, SessionMachine, StartRequest, TriggerMode};
+use voxtype_core::{
+    Command, CommandEffect, ErrorCategory, ReplayPolicy, SessionId, SessionMachine, StartRequest,
+    TriggerMode, VoxError,
+};
+use voxtype_provider_rest::{RestProviderConfig, transcribe_pcm};
 use zbus::fdo;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct VoxTypeDaemon {
     machine: SessionMachine,
     recording: Option<Recording>,
     inserter: ClipboardInserter,
+    config: Config,
+    active_profile: Option<String>,
     quit: bool,
 }
 
@@ -30,9 +42,14 @@ impl VoxTypeDaemon {
         if self.recording.is_some() {
             return Err(fdo::Error::Failed("recording is already active".to_owned()));
         }
+        let (profile_name, _profile) = self
+            .config
+            .profile((!profile.is_empty()).then_some(profile))
+            .ok_or_else(|| fdo::Error::InvalidArgs(format!("unknown profile: {profile}")))?;
+        let profile_name = profile_name.to_owned();
         let request = StartRequest {
             mode: TriggerMode::Toggle,
-            profile: (!profile.is_empty()).then(|| profile.to_owned()),
+            profile: Some(profile_name.clone()),
         };
         let effect = self
             .machine
@@ -45,6 +62,7 @@ impl VoxTypeDaemon {
         match Recording::start() {
             Ok(recording) => {
                 self.recording = Some(recording);
+                self.active_profile = Some(profile_name);
                 self.machine
                     .apply(Command::CaptureReady {
                         session: session.clone(),
@@ -82,22 +100,12 @@ impl VoxTypeDaemon {
         let result = recording
             .stop()
             .map_err(|error| fdo::Error::Failed(format!("failed to stop capture: {error}")))?;
-        self.machine
-            .apply(Command::NoSpeech {
-                session: active.clone(),
-            })
-            .map_err(map_error)?;
-        notify(
-            "VoxType",
-            &format!("Captured {} ms of audio", result.duration_millis),
-        );
-        Ok(format!(
-            "session={} bytes={} duration_ms={} path={}",
-            active,
-            result.bytes,
-            result.duration_millis,
-            result.path.display()
-        ))
+        let response = self.finish_recognition(&active, &result);
+        if !self.config.desktop.retain_recordings {
+            let _result = fs::remove_file(&result.path);
+        }
+        self.active_profile = None;
+        response
     }
 
     fn toggle(&mut self, profile: &str) -> fdo::Result<String> {
@@ -116,12 +124,20 @@ impl VoxTypeDaemon {
         if let Some(recording) = self.recording.take() {
             recording.cancel();
         }
+        self.active_profile = None;
         notify("VoxType", "Dictation cancelled");
         Ok(())
     }
 
     fn reset(&mut self) -> fdo::Result<()> {
         self.machine.apply(Command::Reset).map_err(map_error)?;
+        Ok(())
+    }
+
+    fn reload_configuration(&mut self) -> fdo::Result<()> {
+        let config = Config::load_or_create().map_err(map_error)?;
+        self.inserter = ClipboardInserter::default().with_restore(config.desktop.restore_clipboard);
+        self.config = config;
         Ok(())
     }
 
@@ -150,6 +166,25 @@ impl VoxTypeDaemon {
 }
 
 impl VoxTypeDaemon {
+    /// Loads configuration and constructs the D-Bus service.
+    ///
+    /// # Errors
+    ///
+    /// Returns a normalized configuration error if startup configuration cannot
+    /// be created, parsed, or validated.
+    pub fn load() -> Result<Self, VoxError> {
+        let config = Config::load_or_create()?;
+        let inserter = ClipboardInserter::default().with_restore(config.desktop.restore_clipboard);
+        Ok(Self {
+            machine: SessionMachine::default(),
+            recording: None,
+            inserter,
+            config,
+            active_profile: None,
+            quit: false,
+        })
+    }
+
     #[must_use]
     pub const fn should_quit_value(&self) -> bool {
         self.quit
@@ -168,6 +203,148 @@ impl VoxTypeDaemon {
             Err(fdo::Error::InvalidArgs(
                 "session ID does not match".to_owned(),
             ))
+        }
+    }
+
+    fn finish_recognition(
+        &mut self,
+        session: &SessionId,
+        recording: &RecordingResult,
+    ) -> fdo::Result<String> {
+        if recording.duration_millis < self.config.audio.minimum_duration_millis {
+            self.machine
+                .apply(Command::NoSpeech {
+                    session: session.clone(),
+                })
+                .map_err(map_error)?;
+            notify("VoxType", "Recording was too short");
+            return Ok(format!(
+                "session={session} result=no-speech duration_ms={}",
+                recording.duration_millis
+            ));
+        }
+
+        let profile_name = self
+            .active_profile
+            .as_deref()
+            .unwrap_or(&self.config.default_profile);
+        let profile = self
+            .config
+            .profiles
+            .get(profile_name)
+            .ok_or_else(|| fdo::Error::Failed("active profile disappeared".to_owned()))?;
+        let providers = std::iter::once(&profile.primary)
+            .chain(profile.fallbacks.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let replay = ReplayPolicy::from(profile.replay);
+        let language = profile.language.clone();
+
+        let mut last_error = None;
+        for (index, provider_id) in providers.iter().enumerate() {
+            if index > 0 && replay != ReplayPolicy::BufferedWithConsent {
+                break;
+            }
+            match self.transcribe_with(provider_id, &recording.path, &language) {
+                Ok(text) => {
+                    let effect = self
+                        .machine
+                        .apply(Command::TranscriptReady {
+                            session: session.clone(),
+                            text: text.clone(),
+                        })
+                        .map_err(map_error)?;
+                    let CommandEffect::InsertText { .. } = effect else {
+                        return Err(fdo::Error::Failed(
+                            "state machine did not request insertion".to_owned(),
+                        ));
+                    };
+                    let insertion = self.inserter.insert(&text).map_err(|error| {
+                        fdo::Error::Failed(format!("text insertion failed: {error}"))
+                    })?;
+                    self.machine
+                        .apply(Command::InsertionComplete {
+                            session: session.clone(),
+                        })
+                        .map_err(map_error)?;
+                    notify("VoxType", "Dictation inserted");
+                    return Ok(format!(
+                        "session={session} provider={provider_id} chars={} backend={} clipboard_restored={}",
+                        text.chars().count(),
+                        insertion.backend,
+                        insertion.clipboard_restored
+                    ));
+                }
+                Err(error) => {
+                    let retryable = error.is_retryable();
+                    last_error = Some(error);
+                    if !retryable {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let error = last_error.unwrap_or_else(|| {
+            VoxError::new(
+                ErrorCategory::Unavailable,
+                "provider.no_route",
+                "no provider was attempted",
+            )
+        });
+        let message = error.to_string();
+        let _effect = self.machine.apply(Command::Fail {
+            session: session.clone(),
+            error,
+        });
+        notify("VoxType recognition failed", &message);
+        Err(fdo::Error::Failed(message))
+    }
+
+    fn transcribe_with(
+        &self,
+        provider_id: &str,
+        pcm_path: &Path,
+        language: &str,
+    ) -> Result<String, VoxError> {
+        let provider = self.config.providers.get(provider_id).ok_or_else(|| {
+            VoxError::new(
+                ErrorCategory::Configuration,
+                "provider.not_found",
+                format!("provider {provider_id} is not configured"),
+            )
+        })?;
+        match provider {
+            ProviderConfig::Mock { text } => {
+                if text.trim().is_empty() {
+                    Err(VoxError::new(
+                        ErrorCategory::Protocol,
+                        "provider.mock_empty",
+                        "mock provider text is empty",
+                    ))
+                } else {
+                    Ok(text.clone())
+                }
+            }
+            ProviderConfig::OpenaiCompatible {
+                endpoint,
+                model,
+                secret,
+                timeout_seconds,
+            } => {
+                let api_key = lookup_secret(secret)?;
+                transcribe_pcm(
+                    &RestProviderConfig {
+                        endpoint: endpoint.clone(),
+                        model: model.clone(),
+                        api_key,
+                        timeout_seconds: *timeout_seconds,
+                    },
+                    pcm_path,
+                    language,
+                )
+                .map(|result| result.text)
+            }
         }
     }
 }

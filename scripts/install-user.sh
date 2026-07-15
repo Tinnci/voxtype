@@ -23,7 +23,8 @@ sed "s|@BINDIR@|$bindir|g" \
   > "$dbus_services_dir/io.github.tinnci.VoxType.service"
 
 systemctl --user daemon-reload
-systemctl --user enable --now voxtyped.service
+systemctl --user enable voxtyped.service
+systemctl --user restart voxtyped.service
 kbuildsycoca6 --noincremental
 
 printf 'Installed VoxType for %s\n' "$USER"
