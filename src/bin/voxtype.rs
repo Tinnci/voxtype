@@ -1,6 +1,7 @@
 use std::env;
 use std::error::Error;
 use std::io::{self, Read};
+use voxtype::audio::Recording;
 use voxtype::client::Client;
 use voxtype::config::{Config, config_path, store_secret};
 use voxtype::fcitx::FcitxBridge;
@@ -31,7 +32,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         );
     }
     if command == "doctor" {
-        return doctor_command();
+        return doctor_command(arguments.next().as_deref());
     }
 
     let connection = Connection::session()?;
@@ -83,11 +84,17 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype fcitx-focus\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
+        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype fcitx-focus\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
     );
 }
 
-fn doctor_command() -> Result<(), Box<dyn Error>> {
+fn doctor_command(section: Option<&str>) -> Result<(), Box<dyn Error>> {
+    if section == Some("audio") {
+        return doctor_audio();
+    }
+    if section.is_some() {
+        return Err("usage: voxtype doctor [audio]".into());
+    }
     let config = Config::load_or_create()?;
     println!(
         "config=ok schema={} profiles={} providers={}",
@@ -152,6 +159,22 @@ fn doctor_command() -> Result<(), Box<dyn Error>> {
             println!("command.{command}=missing");
         }
     }
+    Ok(())
+}
+
+fn doctor_audio() -> Result<(), Box<dyn Error>> {
+    let recording = Recording::start()?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let result = recording.stop()?;
+    let cleanup = std::fs::remove_file(&result.path);
+    cleanup?;
+    if result.bytes == 0 {
+        return Err("audio capture produced no PCM data".into());
+    }
+    println!(
+        "audio.capture=ok bytes={} duration_ms={} format=s16le rate=16000 channels=1",
+        result.bytes, result.duration_millis
+    );
     Ok(())
 }
 
