@@ -63,6 +63,17 @@ std::string response(std::string_view status, std::string_view detail) {
 
 } // namespace
 
+class VoxTypeBridgeConfig final : public Configuration {
+public:
+    VoxTypeBridgeConfig()
+        : settings(this, "Settings", "Open VoxType settings",
+                   "voxtype-settings") {}
+
+    const char *typeName() const override { return "VoxTypeBridgeConfig"; }
+
+    ExternalOption settings;
+};
+
 class VoxTypeBridge final : public AddonInstance {
 public:
     explicit VoxTypeBridge(Instance *instance) : instance_(instance) {
@@ -77,6 +88,12 @@ public:
         if (!socketPath_.empty()) {
             unlink(socketPath_.c_str());
         }
+    }
+
+    const Configuration *getConfig() const override { return &config_; }
+
+    void setConfig(const RawConfig &config) override {
+        config_.load(config, true);
     }
 
 private:
@@ -226,6 +243,7 @@ private:
     }
 
     Instance *instance_;
+    VoxTypeBridgeConfig config_;
     int socketFd_ = -1;
     std::string socketPath_;
     std::unique_ptr<EventSourceIO> ioEvent_;

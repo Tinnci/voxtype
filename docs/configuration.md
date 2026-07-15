@@ -13,6 +13,12 @@ voxtype config validate
 voxtype reload
 ```
 
+On Plasma 6, `voxtype-settings` provides the normal settings UI. It can edit
+the default profile, insertion/VAD options, provider soft quotas, and API keys.
+Provider endpoints and models remain visible in the panel and can always be
+edited directly in TOML. API keys are never written to TOML or shown after
+storage.
+
 ## Test profile
 
 The development default uses a deterministic mock provider. It exercises real
@@ -89,7 +95,31 @@ printf '%s' "$API_KEY" | voxtype secret set cloud-a-api-key
 ```
 
 Avoid placing the command in shell history with a literal key. Interactive
-secret prompting will be added before the first stable release.
+secret entry is also available in the settings panel.
+
+## Consumption and soft quotas
+
+VoxType separates three different kinds of data:
+
+- reliable session-local counters: provider attempts, request-stage entries,
+  success/failure, and audio time;
+- token counts explicitly returned by an API `usage` object;
+- user-configured soft limits, which are not provider billing or account
+  balances.
+
+Configure limits per provider:
+
+```toml
+[quotas.cloud-a]
+request_limit = 1000
+audio_seconds_limit = 36000
+token_limit = 1000000
+```
+
+Every limit is optional and must be positive. View the same data as JSON with
+`voxtype usage`, or as progress meters in `voxtype-settings`. Counters currently
+cover the lifetime of the running daemon and reset when it restarts; the panel
+labels this scope explicitly.
 
 ## Fallback privacy policy
 

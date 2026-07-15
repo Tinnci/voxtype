@@ -261,33 +261,31 @@ well-maintained dependency is accepted for that purpose.
 ### Methods
 
 ```text
-Start(a{sv} options) -> (s session_id)
-Stop(s session_id) -> ()
-Toggle(a{sv} options) -> (s session_id)
+Status() -> (s state)
+ActiveSession() -> (s session_id)
+Start(s profile) -> (s session_id)
+Stop(s session_id) -> (s result)
+Toggle(s profile) -> (s result)
 Cancel(s session_id) -> ()
-GetStatus() -> (a{sv} status)
-GetCapabilities() -> (a{sv} capabilities)
-RunDiagnostic(s component) -> (a{sv} result)
+Reset() -> ()
+ProviderStatus() -> (s status)
+UsageStatus() -> (s json)
+LastTranscript() -> (s text)
+TranscriptHistory() -> (as texts)
+CheckLastGrammar() -> (s report)
+ClearHistory() -> ()
 ReloadConfiguration() -> ()
+InsertTest(s text) -> (s result)
 ```
 
-`options` keys initially include `profile`, `trigger_mode`, and `target_policy`.
-Unknown keys are ignored only when explicitly marked optional; malformed known
-keys return `InvalidArgument`.
+An empty profile selects `default_profile`; an empty session ID selects the
+currently active session. `UsageStatus` is JSON because the counters and soft
+quota fields are additive during version 0.x. Transcript history is memory-only,
+limited to twenty VoxType commits, and is never a general application-input
+history.
 
-### Signals
-
-```text
-StateChanged(s session_id, s state, a{sv} details)
-PartialTranscript(s session_id, s text, u sequence)
-FinalTranscript(s session_id, s text, u sequence)
-Completed(s session_id, a{sv} result)
-Failed(s session_id, s code, s message, a{sv} details)
-```
-
-Partial and final transcript signals are disabled for untrusted observers by
-default if D-Bus policy cannot sufficiently constrain access. A UI may instead
-use a private peer connection in a later release.
+The current API is request/response only. Transcript signals are intentionally
+absent until observer privacy and same-user access semantics are defined.
 
 ### Error names
 
@@ -307,17 +305,18 @@ The CLI is a thin D-Bus client. It contains no audio, provider, credential, or
 insertion implementation.
 
 ```text
-voxtype start [--profile NAME] [--target-policy strict|prompt|current]
+voxtype start [PROFILE]
 voxtype stop [SESSION]
-voxtype toggle [--profile NAME]
+voxtype toggle [PROFILE]
 voxtype cancel [SESSION]
-voxtype status [--json]
-voxtype doctor [audio|shortcut|provider|insertion|all] [--json]
-voxtype devices [--json]
-voxtype config path
+voxtype status
+voxtype providers
+voxtype usage
+voxtype grammar last|show|history|clear
+voxtype doctor [audio|shortcut|provider|insertion|all]
+voxtype config path|validate
+voxtype secret set NAME
 ```
-
-Human-readable output may evolve; `--json` fields are versioned and additive.
 
 ## 9. Configuration schema
 

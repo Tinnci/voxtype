@@ -1,6 +1,6 @@
 //! XDG configuration and Secret Service integration.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -21,6 +21,9 @@ insertion_backend = "fcitx"
 
 [audio]
 minimum_duration_millis = 250
+vad_enabled = true
+vad_rms_threshold = 300
+vad_minimum_voiced_frames = 2
 
 [profiles.test]
 primary = "mock"
@@ -33,7 +36,7 @@ kind = "mock"
 text = "VoxType 本地集成测试"
 "#;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
     pub schema_version: u32,
     pub default_profile: String,
@@ -43,9 +46,11 @@ pub struct Config {
     pub audio: AudioConfig,
     pub profiles: BTreeMap<String, ProfileConfig>,
     pub providers: BTreeMap<String, ProviderConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub quotas: BTreeMap<String, ProviderQuotaConfig>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DesktopConfig {
     pub restore_clipboard: bool,
@@ -63,7 +68,7 @@ impl Default for DesktopConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InsertionBackend {
     #[default]
@@ -72,21 +77,27 @@ pub enum InsertionBackend {
     Auto,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AudioConfig {
     pub minimum_duration_millis: u64,
+    pub vad_enabled: bool,
+    pub vad_rms_threshold: u16,
+    pub vad_minimum_voiced_frames: u32,
 }
 
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             minimum_duration_millis: 250,
+            vad_enabled: true,
+            vad_rms_threshold: 300,
+            vad_minimum_voiced_frames: 2,
         }
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProfileConfig {
     pub primary: String,
     #[serde(default)]
@@ -97,7 +108,7 @@ pub struct ProfileConfig {
     pub replay: ReplaySetting,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReplaySetting {
     #[default]
@@ -116,7 +127,7 @@ impl From<ReplaySetting> for ReplayPolicy {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ProviderConfig {
     Mock {
@@ -136,6 +147,13 @@ pub enum ProviderConfig {
         #[serde(default = "default_timeout")]
         timeout_seconds: u64,
     },
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ProviderQuotaConfig {
+    pub request_limit: Option<u64>,
+    pub audio_seconds_limit: Option<u64>,
+    pub token_limit: Option<u64>,
 }
 
 impl Config {
@@ -200,6 +218,19 @@ impl Config {
             }
         }
         for provider in self.providers.values() {
+            match provider {
+                ProviderConfig::Mock { text } if text.trim().is_empty() => {
+                    return Err(configuration("mock provider text is empty"));
+                }
+                ProviderConfig::OpenaiCompatible { model, secret, .. }
+                    if model.trim().is_empty() || secret.trim().is_empty() =>
+                {
+                    return Err(configuration(
+                        "OpenAI-compatible provider model and secret reference are required",
+                    ));
+                }
+                _ => {}
+            }
             let timeout_seconds = match provider {
                 ProviderConfig::OpenaiCompatible {
                     timeout_seconds, ..
@@ -229,6 +260,72 @@ impl Config {
                     "command provider program must be an absolute path",
                 ));
             }
+        }
+        for (provider, quota) in &self.quotas {
+            if !self.providers.contains_key(provider) {
+                return Err(configuration(&format!(
+                    "quota references unknown provider {provider}"
+                )));
+            }
+            if matches!(quota.request_limit, Some(0))
+                || matches!(quota.audio_seconds_limit, Some(0))
+                || matches!(quota.token_limit, Some(0))
+            {
+                return Err(configuration("provider quota limits must be positive"));
+            }
+        }
+        if self.audio.vad_rms_threshold == 0 || self.audio.vad_rms_threshold > 10_000 {
+            return Err(configuration(
+                "VAD RMS threshold must be between 1 and 10000",
+            ));
+        }
+        if !(1..=100).contains(&self.audio.vad_minimum_voiced_frames) {
+            return Err(configuration(
+                "VAD minimum voiced frames must be between 1 and 100",
+            ));
+        }
+        if !(50..=10_000).contains(&self.audio.minimum_duration_millis) {
+            return Err(configuration(
+                "minimum recording duration must be between 50 and 10000 milliseconds",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Writes a validated configuration atomically with user-only permissions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when validation, serialization, or the
+    /// atomic replacement fails.
+    pub fn save(&self) -> Result<(), VoxError> {
+        self.validate()?;
+        let path = config_path()?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| configuration("configuration path has no parent directory"))?;
+        fs::create_dir_all(parent).map_err(config_io)?;
+        let serialized = toml::to_string_pretty(self).map_err(|error| {
+            VoxError::new(
+                ErrorCategory::Configuration,
+                "config.serialize_failed",
+                error.to_string(),
+            )
+        })?;
+        let temporary = path.with_extension(format!("toml.tmp-{}", std::process::id()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(config_io)?;
+        if let Err(error) = file
+            .write_all(serialized.as_bytes())
+            .and_then(|()| file.sync_all())
+            .and_then(|()| fs::rename(&temporary, &path))
+        {
+            let _ = fs::remove_file(&temporary);
+            return Err(config_io(error));
         }
         Ok(())
     }
@@ -302,6 +399,23 @@ pub fn lookup_secret(name: &str) -> Result<SecretString, VoxError> {
         ));
     }
     Ok(SecretString::new(value))
+}
+
+/// Checks whether a secret reference is available without loading its value
+/// into the `VoxType` process.
+#[must_use]
+pub fn secret_state(name: &str) -> &'static str {
+    match Command::new("secret-tool")
+        .args(["lookup", "application", "voxtype", "name", name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => "configured",
+        Ok(_) => "missing",
+        Err(_) => "unavailable",
+    }
 }
 
 /// Stores a provider secret in Secret Service/KWallet.
@@ -426,5 +540,66 @@ mod tests {
             .expect("test profile")
             .primary = "cloud".to_owned();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_positive_provider_quotas() {
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        config.quotas.insert(
+            "mock".to_owned(),
+            ProviderQuotaConfig {
+                request_limit: Some(100),
+                audio_seconds_limit: Some(3_600),
+                token_limit: Some(10_000),
+            },
+        );
+        config.validate().expect("positive quota validates");
+        config
+            .quotas
+            .get_mut("mock")
+            .expect("mock quota")
+            .token_limit = Some(0);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn serializes_configuration_without_secret_values() {
+        let config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        let serialized = toml::to_string_pretty(&config).expect("configuration serializes");
+        assert!(serialized.contains("[providers.mock]"));
+        assert!(!serialized.contains("api_key"));
+    }
+
+    #[test]
+    fn round_trips_rest_provider_and_quota_settings() {
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        config.providers.insert(
+            "cloud".to_owned(),
+            ProviderConfig::OpenaiCompatible {
+                endpoint: "https://example.com/v1/audio/transcriptions".to_owned(),
+                model: "asr-model".to_owned(),
+                secret: "cloud-key".to_owned(),
+                timeout_seconds: 45,
+            },
+        );
+        config.quotas.insert(
+            "cloud".to_owned(),
+            ProviderQuotaConfig {
+                request_limit: Some(100),
+                audio_seconds_limit: Some(3_600),
+                token_limit: Some(50_000),
+            },
+        );
+        let serialized = toml::to_string_pretty(&config).expect("configuration serializes");
+        let round_trip: Config = toml::from_str(&serialized).expect("configuration parses again");
+        round_trip.validate().expect("round trip validates");
+        assert_eq!(round_trip.quotas["cloud"].request_limit, Some(100));
+        assert!(matches!(
+            round_trip.providers["cloud"],
+            ProviderConfig::OpenaiCompatible {
+                timeout_seconds: 45,
+                ..
+            }
+        ));
     }
 }

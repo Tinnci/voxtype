@@ -40,6 +40,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     match command.as_str() {
         "status" => println!("{}", client.status()?),
         "providers" => println!("{}", client.provider_status()?),
+        "usage" => println!("{}", client.usage_status()?),
+        "grammar" => grammar_command(&client, arguments.next().as_deref().unwrap_or("last"))?,
         "fcitx-focus" => {
             if client.status()? != "idle" {
                 return Err("fcitx focus probing requires an idle daemon".into());
@@ -84,8 +86,23 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype fcitx-focus\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio|shortcut|insertion|provider|all]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
+        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype usage\n  voxtype grammar last|show|history|clear\n  voxtype fcitx-focus\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio|shortcut|insertion|provider|all]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
     );
+}
+
+fn grammar_command(client: &Client<'_>, action: &str) -> Result<(), Box<dyn Error>> {
+    match action {
+        "last" => println!("{}", client.check_last_grammar()?),
+        "show" => println!("{}", client.last_transcript()?),
+        "history" => {
+            for (index, text) in client.transcript_history()?.iter().enumerate() {
+                println!("{}\t{}", index + 1, text);
+            }
+        }
+        "clear" => client.clear_history()?,
+        _ => return Err("usage: voxtype grammar last|show|history|clear".into()),
+    }
+    Ok(())
 }
 
 fn doctor_command(section: Option<&str>) -> Result<(), Box<dyn Error>> {
@@ -167,6 +184,10 @@ fn doctor_command(section: Option<&str>) -> Result<(), Box<dyn Error>> {
         "ydotool",
         "notify-send",
         "qdbus6",
+        "qml6",
+        "secret-tool",
+        "xdg-open",
+        "systemsettings",
     ] {
         if command_exists(command) {
             println!("command.{command}=ok");
@@ -235,24 +256,35 @@ fn require_idle_daemon(operation: &str) -> Result<(), Box<dyn Error>> {
 }
 
 fn kglobalaccel_state() -> &'static str {
+    if kglobalaccel_actions(
+        "/component/io_github_tinnci_VoxType_desktop",
+        &["_launch", "Cancel"],
+    ) && kglobalaccel_actions(
+        "/component/io_github_tinnci_VoxType_Grammar_desktop",
+        &["_launch"],
+    ) {
+        "ok"
+    } else {
+        "unregistered"
+    }
+}
+
+fn kglobalaccel_actions(path: &str, expected: &[&str]) -> bool {
     let output = std::process::Command::new("qdbus6")
         .args([
             "org.kde.kglobalaccel",
-            "/component/io_github_tinnci_VoxType_desktop",
+            path,
             "org.kde.kglobalaccel.Component.shortcutNames",
         ])
         .output();
     match output {
         Ok(output) if output.status.success() => {
             let shortcuts = String::from_utf8_lossy(&output.stdout);
-            if shortcuts.contains("_launch") && shortcuts.contains("Cancel") {
-                "ok"
-            } else {
-                "unregistered"
-            }
+            expected
+                .iter()
+                .all(|name| shortcuts.lines().any(|line| line == *name))
         }
-        Ok(_) => "unregistered",
-        Err(_) => "unavailable",
+        Ok(_) | Err(_) => false,
     }
 }
 

@@ -13,6 +13,8 @@ stable native addon API is C++.
 - rechecks focus, context identity, and secure flags before committing;
 - defers `commitString` to the next Fcitx event-loop turn;
 - never performs audio capture, network access, secret lookup, or clipboard work.
+- exposes one standard Fcitx external-config action that launches
+  `voxtype-settings`; all configuration logic remains in the Rust application.
 
 ## Build and install
 
@@ -29,10 +31,19 @@ The script installs only:
 ```text
 /usr/lib/fcitx5/libvoxtypebridge.so
 /usr/share/fcitx5/addon/voxtypebridge.conf
+~/.local/share/fcitx5/addon/voxtypebridge.conf
 ```
 
-It does not replace distribution files. After installation, restart only Fcitx5
+The user-level copy prevents an older development override from shadowing the
+new system metadata. It contains no executable code. The installer does not
+replace distribution-owned addons. After installation, restart only Fcitx5
 using the commands printed by the script.
+
+On Plasma 6, open **System Settings → Keyboard → Input Method**, show the Fcitx
+addons, and configure **VoxType Voice Input Integration**. The page contains a
+thin **Open VoxType settings** action. This is intentionally not a full KDE KCM:
+it avoids duplicating configuration and keeps the same settings UI usable on
+other desktops.
 
 Verify:
 
@@ -40,6 +51,9 @@ Verify:
 test -S "$XDG_RUNTIME_DIR/voxtype/fcitx.sock"
 voxtype doctor
 ```
+
+Remove only the VoxType addon with `./scripts/uninstall-fcitx-addon.sh`; it also
+prints the Fcitx-only restart commands and never requests a system reboot.
 
 For a manual end-to-end check, focus a normal non-password text field and run
 the following command from a separately prepared terminal or shortcut:

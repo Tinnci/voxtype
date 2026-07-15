@@ -39,6 +39,18 @@ pub struct RestProviderConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Transcription {
     pub text: String,
+    pub usage: ApiUsage,
+}
+
+/// Token counters explicitly reported by a provider response.
+///
+/// Missing fields remain `None`; `VoxType` does not estimate tokens from audio
+/// duration or transcript length.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ApiUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
 }
 
 /// Transcribes raw 16 kHz mono signed 16-bit PCM.
@@ -140,7 +152,25 @@ fn request(
         })?;
     Ok(Transcription {
         text: text.to_owned(),
+        usage: parse_usage(&value),
     })
+}
+
+fn parse_usage(value: &serde_json::Value) -> ApiUsage {
+    let Some(usage) = value.get("usage").and_then(serde_json::Value::as_object) else {
+        return ApiUsage::default();
+    };
+    ApiUsage {
+        input_tokens: first_u64(usage, &["input_tokens", "prompt_tokens"]),
+        output_tokens: first_u64(usage, &["output_tokens", "completion_tokens"]),
+        total_tokens: first_u64(usage, &["total_tokens"]),
+    }
+}
+
+fn first_u64(object: &serde_json::Map<String, serde_json::Value>, names: &[&str]) -> Option<u64> {
+    names
+        .iter()
+        .find_map(|name| object.get(*name).and_then(serde_json::Value::as_u64))
 }
 
 fn classify_http_failure(message: &str) -> (ErrorCategory, bool) {
@@ -325,7 +355,7 @@ mod tests {
             assert!(request_text.contains("Authorization: Bearer test-key"));
             assert!(request_text.contains("test-model"));
             assert!(request.windows(4).any(|window| window == b"RIFF"));
-            let body = br#"{"text":"loopback transcript"}"#;
+            let body = br#"{"text":"loopback transcript","usage":{"prompt_tokens":11,"completion_tokens":4,"total_tokens":15}}"#;
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -352,8 +382,37 @@ mod tests {
         )
         .expect("loopback transcription");
         assert_eq!(result.text, "loopback transcript");
+        assert_eq!(
+            result.usage,
+            ApiUsage {
+                input_tokens: Some(11),
+                output_tokens: Some(4),
+                total_tokens: Some(15),
+            }
+        );
         server.join().expect("loopback server");
         let _result = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn leaves_absent_usage_unknown() {
+        let value = serde_json::json!({"text": "hello"});
+        assert_eq!(parse_usage(&value), ApiUsage::default());
+    }
+
+    #[test]
+    fn accepts_openai_token_field_names() {
+        let value = serde_json::json!({
+            "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15}
+        });
+        assert_eq!(
+            parse_usage(&value),
+            ApiUsage {
+                input_tokens: Some(12),
+                output_tokens: Some(3),
+                total_tokens: Some(15),
+            }
+        );
     }
 
     fn complete_http_request(request: &[u8]) -> bool {

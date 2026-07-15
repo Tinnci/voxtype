@@ -3,10 +3,10 @@
 ## Component boundaries
 
 ```text
-KDE shortcut / CLI
+KDE shortcut / CLI / settings QML
         |
         v
-  D-Bus control API -----> tray / notifications
+  D-Bus control API -----> tray / notifications / overlay
         |
         v
  session state machine
@@ -39,27 +39,26 @@ The core chooses a provider and owns fallback policy. Providers do not call each
 other, access the desktop, insert text, or decide whether audio may be sent to a
 second service.
 
-## Planned Rust modules and packages
+## Current packages and adapters
 
-- `domain`: session states, events, errors, policies, and provider-neutral types.
-- `audio`: PipeWire capture, format conversion, level diagnostics, and framing.
-- `provider`: provider trait plus Doubao and future local/cloud implementations.
-- `desktop-kde`: global shortcut, tray, notification, focus, and insertion
-  adapters for Plasma.
-- `ipc`: D-Bus daemon API and CLI client.
-- `config`: XDG configuration, profiles, migrations, and secret references.
-- `app`: orchestration and lifecycle.
+- `voxtype-core`: dependency-free session state, routing policy, provider-neutral
+  errors, and audio contracts.
+- `voxtype-provider-rest`: WAV staging, system-curl transport, JSON response and
+  provider-reported usage parsing.
+- root `voxtype` package: daemon orchestration, audio process adapter, D-Bus,
+  configuration, Secret Service, VAD, grammar, Fcitx/clipboard insertion, and
+  thin CLI/tray/settings/overlay binaries.
+- `fcitx5-addon`: small C++ focus-safe input-context bridge and external settings
+  launcher; it contains no ASR or configuration policy.
 
-The initial scaffold remains one package. Before the second real online provider
-lands, convert it to a small workspace:
+Further crates are justified only by a materially different protocol, SDK,
+native dependency, or licensing/failure boundary. A likely future shape is:
 
 ```text
 voxtype/
   crates/
     voxtype-core/             # dependency-light policy and contracts
-    voxtype-app/              # orchestration and daemon state machine
-    voxtype-desktop-kde/      # KDE/D-Bus/insertion adapter
-    voxtype-audio/            # capture and conversion adapter
+    voxtype-app/              # orchestration if the root crate becomes too broad
     voxtype-provider-doubao/  # unofficial protocol, isolated license/risk
     voxtype-provider-<name>/  # another online provider
   src/bin/
@@ -67,9 +66,9 @@ voxtype/
     voxtyped.rs               # daemon entry point
 ```
 
-This is a target shape, not a requirement to create every package immediately.
-`voxtype-core` and each provider are the valuable boundaries. Tiny facade crates
-or one-trait packages are explicitly discouraged.
+This is not a requirement to create every package. `voxtype-core` and providers
+with different risk/dependency profiles are the valuable boundaries. Tiny
+facade crates or one-trait packages remain explicitly discouraged.
 
 ## Important design rules
 

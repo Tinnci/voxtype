@@ -5,7 +5,10 @@ use crate::{
     config::{Config, InsertionBackend, ProviderConfig, lookup_secret},
     desktop::ClipboardInserter,
     fcitx::FcitxBridge,
+    grammar,
+    vad::{self, VadConfig, VadResult},
 };
+use std::collections::VecDeque;
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -15,7 +18,7 @@ use voxtype_core::{
     Command, CommandEffect, ErrorCategory, ReplayPolicy, SessionId, SessionMachine, StartRequest,
     TriggerMode, VoxError,
 };
-use voxtype_provider_rest::{RestProviderConfig, transcribe_pcm};
+use voxtype_provider_rest::{ApiUsage, RestProviderConfig, transcribe_pcm};
 use zbus::fdo;
 
 #[derive(Debug)]
@@ -27,6 +30,8 @@ pub struct VoxTypeDaemon {
     active_profile: Option<String>,
     armed_insertion: Option<ArmedInsertion>,
     provider_health: std::collections::BTreeMap<String, ProviderHealthState>,
+    provider_usage: std::collections::BTreeMap<String, ProviderUsageState>,
+    transcript_history: VecDeque<String>,
     quit: bool,
 }
 
@@ -48,6 +53,42 @@ struct ProviderHealthState {
     blocked_until: Option<Instant>,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize)]
+struct ProviderUsageState {
+    attempts: u64,
+    requests: u64,
+    successes: u64,
+    failures: u64,
+    audio_millis: u64,
+    token_reports: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    total_tokens: u64,
+    reported_tokens: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ProviderTranscript {
+    text: String,
+    api_usage: ApiUsage,
+}
+
+#[derive(Debug)]
+enum PreparedProvider {
+    Mock(String),
+    Rest(RestProviderConfig),
+    Command {
+        program: String,
+        args: Vec<String>,
+        timeout_seconds: u64,
+    },
+}
+
+enum VoiceActivity {
+    Continue(Option<VadResult>),
+    NoSpeech(String),
+}
+
 impl ProviderHealthState {
     fn is_available_at(&self, now: Instant) -> bool {
         self.blocked_until.is_none_or(|deadline| now >= deadline)
@@ -58,6 +99,48 @@ impl ProviderHealthState {
         if self.consecutive_failures >= 3 {
             self.blocked_until = Some(now + Duration::from_secs(60));
         }
+    }
+}
+
+impl ProviderUsageState {
+    fn record_attempt(&mut self) {
+        self.attempts = self.attempts.saturating_add(1);
+    }
+
+    fn record_request(&mut self, audio_millis: u64) {
+        self.requests = self.requests.saturating_add(1);
+        self.audio_millis = self.audio_millis.saturating_add(audio_millis);
+    }
+
+    fn record_success(&mut self, usage: ApiUsage) {
+        self.successes = self.successes.saturating_add(1);
+        if usage.input_tokens.is_none()
+            && usage.output_tokens.is_none()
+            && usage.total_tokens.is_none()
+        {
+            return;
+        }
+        self.token_reports = self.token_reports.saturating_add(1);
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(usage.input_tokens.unwrap_or(0));
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(usage.output_tokens.unwrap_or(0));
+        self.total_tokens = self
+            .total_tokens
+            .saturating_add(usage.total_tokens.unwrap_or(0));
+        let reported = usage.total_tokens.unwrap_or_else(|| {
+            usage
+                .input_tokens
+                .unwrap_or(0)
+                .saturating_add(usage.output_tokens.unwrap_or(0))
+        });
+        self.reported_tokens = self.reported_tokens.saturating_add(reported);
+    }
+
+    fn record_failure(&mut self) {
+        self.failures = self.failures.saturating_add(1);
     }
 }
 
@@ -88,6 +171,62 @@ impl VoxTypeDaemon {
             })
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// Returns session-local consumption counters and configured soft limits.
+    fn usage_status(&self) -> String {
+        let providers = self
+            .config
+            .providers
+            .keys()
+            .map(|id| {
+                let usage = self.provider_usage.get(id).cloned().unwrap_or_default();
+                let quota = self.config.quotas.get(id).cloned().unwrap_or_default();
+                (
+                    id.clone(),
+                    serde_json::json!({
+                        "usage": usage,
+                        "quota": quota,
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        serde_json::json!({
+            "scope": "daemon-session",
+            "providers": providers,
+        })
+        .to_string()
+    }
+
+    fn last_transcript(&self) -> String {
+        self.transcript_history.back().cloned().unwrap_or_default()
+    }
+
+    fn transcript_history(&self) -> Vec<String> {
+        self.transcript_history.iter().cloned().collect()
+    }
+
+    fn check_last_grammar(&self) -> fdo::Result<String> {
+        let text = self
+            .transcript_history
+            .back()
+            .map(String::as_str)
+            .ok_or_else(|| fdo::Error::Failed("no previous transcript is available".to_owned()))?;
+        let report = grammar::check(text);
+        let body = if report.is_clean() {
+            "No local grammar issues found".to_owned()
+        } else {
+            format!(
+                "{} suggestion(s) · see CLI for details",
+                report.issues.len()
+            )
+        };
+        overlay("grammar", "Grammar check", &body, 5_000);
+        Ok(report.render())
+    }
+
+    fn clear_history(&mut self) {
+        self.transcript_history.clear();
     }
 
     fn start(&mut self, profile: &str) -> fdo::Result<String> {
@@ -141,6 +280,12 @@ impl VoxTypeDaemon {
                     })
                     .map_err(map_error)?;
                 notify("VoxType", "Listening…");
+                overlay(
+                    "listening",
+                    "Listening",
+                    "Speak now · shortcut again to stop",
+                    0,
+                );
                 Ok(session.to_string())
             }
             Err(error) => {
@@ -176,6 +321,12 @@ impl VoxTypeDaemon {
         let result = recording
             .stop()
             .map_err(|error| fdo::Error::Failed(format!("failed to stop capture: {error}")))?;
+        overlay(
+            "processing",
+            "Processing speech",
+            "Running VAD and recognition",
+            0,
+        );
         let response = self.finish_recognition(&active, &result);
         if response.is_err() && self.armed_insertion == Some(ArmedInsertion::Fcitx) {
             FcitxBridge.cancel(&active);
@@ -212,6 +363,12 @@ impl VoxTypeDaemon {
         self.active_profile = None;
         self.armed_insertion = None;
         notify("VoxType", "Dictation cancelled");
+        overlay(
+            "cancelled",
+            "Dictation cancelled",
+            "No text was inserted",
+            1_800,
+        );
         Ok(())
     }
 
@@ -283,6 +440,8 @@ impl VoxTypeDaemon {
             active_profile: None,
             armed_insertion: None,
             provider_health: std::collections::BTreeMap::new(),
+            provider_usage: std::collections::BTreeMap::new(),
+            transcript_history: VecDeque::with_capacity(20),
             quit: false,
         })
     }
@@ -313,21 +472,14 @@ impl VoxTypeDaemon {
         session: &SessionId,
         recording: &RecordingResult,
     ) -> fdo::Result<String> {
-        if recording.duration_millis < self.config.audio.minimum_duration_millis {
-            if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
-                FcitxBridge.cancel(session);
-            }
-            self.machine
-                .apply(Command::NoSpeech {
-                    session: session.clone(),
-                })
-                .map_err(map_error)?;
-            notify("VoxType", "Recording was too short");
-            return Ok(format!(
-                "session={session} result=no-speech duration_ms={}",
-                recording.duration_millis
-            ));
+        if let Some(response) = self.check_minimum_duration(session, recording)? {
+            return Ok(response);
         }
+
+        let vad_result = match self.check_voice_activity(session, recording)? {
+            VoiceActivity::Continue(result) => result,
+            VoiceActivity::NoSpeech(response) => return Ok(response),
+        };
 
         let profile_name = self
             .active_profile
@@ -355,36 +507,39 @@ impl VoxTypeDaemon {
                 break;
             }
             attempted_provider = true;
-            match self.transcribe_with(provider_id, &recording.path, &language) {
-                Ok(text) => {
-                    self.provider_succeeded(provider_id);
-                    let effect = self
-                        .machine
-                        .apply(Command::TranscriptReady {
-                            session: session.clone(),
-                            text: text.clone(),
-                        })
-                        .map_err(map_error)?;
-                    let CommandEffect::InsertText { .. } = effect else {
-                        return Err(fdo::Error::Failed(
-                            "state machine did not request insertion".to_owned(),
-                        ));
-                    };
-                    let insertion = self.insert_text(session, &text).map_err(map_error)?;
-                    self.machine
-                        .apply(Command::InsertionComplete {
-                            session: session.clone(),
-                        })
-                        .map_err(map_error)?;
-                    notify("VoxType", "Dictation inserted");
-                    return Ok(format!(
-                        "session={session} provider={provider_id} chars={} backend={} clipboard_restored={}",
-                        text.chars().count(),
-                        insertion.backend,
-                        insertion.clipboard_restored
-                    ));
+            self.provider_usage
+                .entry(provider_id.clone())
+                .or_default()
+                .record_attempt();
+            let prepared = match self.prepare_provider(provider_id) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.provider_usage
+                        .entry(provider_id.clone())
+                        .or_default()
+                        .record_failure();
+                    let retryable = error.is_retryable();
+                    self.provider_failed(provider_id, retryable);
+                    last_error = Some(error);
+                    if !retryable {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            self.provider_usage
+                .entry(provider_id.clone())
+                .or_default()
+                .record_request(recording.duration_millis);
+            match invoke_provider(prepared, &recording.path, &language) {
+                Ok(transcript) => {
+                    return self.complete_recognition(session, provider_id, transcript, vad_result);
                 }
                 Err(error) => {
+                    self.provider_usage
+                        .entry(provider_id.clone())
+                        .or_default()
+                        .record_failure();
                     let retryable = error.is_retryable();
                     self.provider_failed(provider_id, retryable);
                     last_error = Some(error);
@@ -408,7 +563,139 @@ impl VoxTypeDaemon {
             error,
         });
         notify("VoxType recognition failed", &message);
+        overlay(
+            "error",
+            "Recognition failed",
+            "Open diagnostics for details",
+            3_500,
+        );
         Err(fdo::Error::Failed(message))
+    }
+
+    fn complete_recognition(
+        &mut self,
+        session: &SessionId,
+        provider_id: &str,
+        transcript: ProviderTranscript,
+        vad_result: Option<VadResult>,
+    ) -> fdo::Result<String> {
+        let ProviderTranscript { text, api_usage } = transcript;
+        self.provider_usage
+            .entry(provider_id.to_owned())
+            .or_default()
+            .record_success(api_usage);
+        self.provider_succeeded(provider_id);
+        let effect = self
+            .machine
+            .apply(Command::TranscriptReady {
+                session: session.clone(),
+                text: text.clone(),
+            })
+            .map_err(map_error)?;
+        let CommandEffect::InsertText { .. } = effect else {
+            return Err(fdo::Error::Failed(
+                "state machine did not request insertion".to_owned(),
+            ));
+        };
+        let insertion = self.insert_text(session, &text).map_err(map_error)?;
+        self.machine
+            .apply(Command::InsertionComplete {
+                session: session.clone(),
+            })
+            .map_err(map_error)?;
+        if self.transcript_history.len() == 20 {
+            self.transcript_history.pop_front();
+        }
+        self.transcript_history.push_back(text.clone());
+        notify("VoxType", "Dictation inserted");
+        overlay(
+            "done",
+            "Text inserted",
+            "Meta+Alt+G checks recent grammar",
+            2_000,
+        );
+        Ok(format!(
+            "session={session} provider={provider_id} chars={} backend={} clipboard_restored={} vad={}",
+            text.chars().count(),
+            insertion.backend,
+            insertion.clipboard_restored,
+            vad_result.map_or_else(
+                || "disabled".to_owned(),
+                |result| format!(
+                    "speech:{}/{}:rms={}:peak={}",
+                    result.voiced_frames, result.total_frames, result.average_rms, result.peak
+                )
+            )
+        ))
+    }
+
+    fn check_voice_activity(
+        &mut self,
+        session: &SessionId,
+        recording: &RecordingResult,
+    ) -> fdo::Result<VoiceActivity> {
+        if !self.config.audio.vad_enabled {
+            return Ok(VoiceActivity::Continue(None));
+        }
+        let result = vad::analyze_file(
+            &recording.path,
+            VadConfig {
+                rms_threshold: self.config.audio.vad_rms_threshold,
+                minimum_voiced_frames: self.config.audio.vad_minimum_voiced_frames,
+            },
+        )
+        .map_err(|error| fdo::Error::Failed(format!("VAD analysis failed: {error}")))?;
+        if result.speech_detected {
+            return Ok(VoiceActivity::Continue(Some(result)));
+        }
+        if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
+            FcitxBridge.cancel(session);
+        }
+        self.machine
+            .apply(Command::NoSpeech {
+                session: session.clone(),
+            })
+            .map_err(map_error)?;
+        notify("VoxType", "No speech detected");
+        overlay(
+            "idle",
+            "No speech detected",
+            "Try speaking closer to the microphone",
+            2_200,
+        );
+        Ok(VoiceActivity::NoSpeech(format!(
+            "session={session} result=no-speech vad_voiced_frames={} vad_total_frames={} average_rms={} peak={}",
+            result.voiced_frames, result.total_frames, result.average_rms, result.peak
+        )))
+    }
+
+    fn check_minimum_duration(
+        &mut self,
+        session: &SessionId,
+        recording: &RecordingResult,
+    ) -> fdo::Result<Option<String>> {
+        if recording.duration_millis >= self.config.audio.minimum_duration_millis {
+            return Ok(None);
+        }
+        if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
+            FcitxBridge.cancel(session);
+        }
+        self.machine
+            .apply(Command::NoSpeech {
+                session: session.clone(),
+            })
+            .map_err(map_error)?;
+        notify("VoxType", "Recording was too short");
+        overlay(
+            "idle",
+            "Recording too short",
+            "Hold the shortcut a little longer",
+            2_000,
+        );
+        Ok(Some(format!(
+            "session={session} result=no-speech duration_ms={}",
+            recording.duration_millis
+        )))
     }
 
     fn provider_is_available(&self, provider_id: &str) -> bool {
@@ -432,12 +719,7 @@ impl VoxTypeDaemon {
         health.record_retryable_failure_at(Instant::now());
     }
 
-    fn transcribe_with(
-        &self,
-        provider_id: &str,
-        pcm_path: &Path,
-        language: &str,
-    ) -> Result<String, VoxError> {
+    fn prepare_provider(&self, provider_id: &str) -> Result<PreparedProvider, VoxError> {
         let provider = self.config.providers.get(provider_id).ok_or_else(|| {
             VoxError::new(
                 ErrorCategory::Configuration,
@@ -454,7 +736,7 @@ impl VoxTypeDaemon {
                         "mock provider text is empty",
                     ))
                 } else {
-                    Ok(text.clone())
+                    Ok(PreparedProvider::Mock(text.clone()))
                 }
             }
             ProviderConfig::OpenaiCompatible {
@@ -464,24 +746,52 @@ impl VoxTypeDaemon {
                 timeout_seconds,
             } => {
                 let api_key = lookup_secret(secret)?;
-                transcribe_pcm(
-                    &RestProviderConfig {
-                        endpoint: endpoint.clone(),
-                        model: model.clone(),
-                        api_key,
-                        timeout_seconds: *timeout_seconds,
-                    },
-                    pcm_path,
-                    language,
-                )
-                .map(|result| result.text)
+                Ok(PreparedProvider::Rest(RestProviderConfig {
+                    endpoint: endpoint.clone(),
+                    model: model.clone(),
+                    api_key,
+                    timeout_seconds: *timeout_seconds,
+                }))
             }
             ProviderConfig::Command {
                 program,
                 args,
                 timeout_seconds,
-            } => transcribe_command(program, args, *timeout_seconds, pcm_path, language),
+            } => Ok(PreparedProvider::Command {
+                program: program.clone(),
+                args: args.clone(),
+                timeout_seconds: *timeout_seconds,
+            }),
         }
+    }
+}
+
+fn invoke_provider(
+    provider: PreparedProvider,
+    pcm_path: &Path,
+    language: &str,
+) -> Result<ProviderTranscript, VoxError> {
+    match provider {
+        PreparedProvider::Mock(text) => Ok(ProviderTranscript {
+            text,
+            api_usage: ApiUsage::default(),
+        }),
+        PreparedProvider::Rest(config) => {
+            transcribe_pcm(&config, pcm_path, language).map(|result| ProviderTranscript {
+                text: result.text,
+                api_usage: result.usage,
+            })
+        }
+        PreparedProvider::Command {
+            program,
+            args,
+            timeout_seconds,
+        } => transcribe_command(&program, &args, timeout_seconds, pcm_path, language).map(|text| {
+            ProviderTranscript {
+                text,
+                api_usage: ApiUsage::default(),
+            }
+        }),
     }
 }
 
@@ -615,6 +925,12 @@ fn notify(summary: &str, body: &str) {
         .spawn();
 }
 
+fn overlay(state: &str, title: &str, body: &str, timeout_millis: u32) {
+    let _ = ProcessCommand::new("voxtype-overlay")
+        .args(["show", state, title, body, &timeout_millis.to_string()])
+        .spawn();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,6 +947,39 @@ mod tests {
         health.record_retryable_failure_at(now);
         assert!(!health.is_available_at(now + Duration::from_secs(59)));
         assert!(health.is_available_at(now + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn usage_only_counts_tokens_reported_by_api() {
+        let mut usage = ProviderUsageState::default();
+        usage.record_attempt();
+        usage.record_failure();
+        assert_eq!(usage.attempts, 1);
+        assert_eq!(usage.requests, 0);
+        assert_eq!(usage.audio_millis, 0);
+
+        usage.record_attempt();
+        usage.record_request(1_250);
+        usage.record_success(ApiUsage::default());
+        assert_eq!(usage.requests, 1);
+        assert_eq!(usage.audio_millis, 1_250);
+        assert_eq!(usage.token_reports, 0);
+        assert_eq!(usage.reported_tokens, 0);
+
+        usage.record_attempt();
+        usage.record_request(750);
+        usage.record_success(ApiUsage {
+            input_tokens: Some(12),
+            output_tokens: Some(3),
+            total_tokens: Some(15),
+        });
+        assert_eq!(usage.attempts, 3);
+        assert_eq!(usage.requests, 2);
+        assert_eq!(usage.successes, 2);
+        assert_eq!(usage.failures, 1);
+        assert_eq!(usage.audio_millis, 2_000);
+        assert_eq!(usage.token_reports, 1);
+        assert_eq!(usage.reported_tokens, 15);
     }
 
     #[test]

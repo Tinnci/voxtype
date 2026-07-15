@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=VoxType Settings
+Name[zh_CN]=VoxType 设置
+Comment=Configure voice input providers, API keys, VAD, usage, and soft quotas
+Comment[zh_CN]=配置语音服务、API 密钥、VAD、用量与软限额
+Exec=voxtype-settings
+Icon=preferences-desktop-text-to-speech
+Terminal=false
+Categories=Settings;Accessibility;
+StartupNotify=true

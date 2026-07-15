@@ -7,14 +7,40 @@ applications_dir=${HOME}/.local/share/applications
 dbus_services_dir=${HOME}/.local/share/dbus-1/services
 systemd_dir=${HOME}/.config/systemd/user
 
+for command in cargo install systemctl kbuildsycoca6 parec notify-send; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    printf 'Required command is missing: %s\n' "$command" >&2
+    exit 1
+  fi
+done
+if ! command -v qml6 >/dev/null 2>&1 \
+  && [[ ! -x /usr/lib/qt6/bin/qml6 ]] \
+  && [[ ! -x /usr/libexec/qt6/qml6 ]]; then
+  printf 'Required Qt 6 QML runtime is missing (qml6).\n' >&2
+  exit 1
+fi
+for command in curl secret-tool wl-copy wl-paste ydotool; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    printf 'Optional capability is unavailable; command missing: %s\n' "$command" >&2
+  fi
+done
+
 cd "$repo_root"
-cargo build --release --workspace --bins
+cargo build --release --locked --workspace --bins
 
 install -Dm755 target/release/voxtype "$bindir/voxtype"
 install -Dm755 target/release/voxtyped "$bindir/voxtyped"
 install -Dm755 target/release/voxtype-tray "$bindir/voxtype-tray"
+install -Dm755 target/release/voxtype-overlay "$bindir/voxtype-overlay"
+install -Dm755 target/release/voxtype-settings "$bindir/voxtype-settings"
+install -Dm644 packaging/qml/Overlay.qml "$HOME/.local/share/voxtype/Overlay.qml"
+install -Dm644 packaging/qml/Settings.qml "$HOME/.local/share/voxtype/Settings.qml"
 install -Dm644 packaging/applications/io.github.tinnci.VoxType.desktop \
   "$applications_dir/io.github.tinnci.VoxType.desktop"
+install -Dm644 packaging/applications/io.github.tinnci.VoxType.Settings.desktop \
+  "$applications_dir/io.github.tinnci.VoxType.Settings.desktop"
+install -Dm644 packaging/applications/io.github.tinnci.VoxType.Grammar.desktop \
+  "$applications_dir/io.github.tinnci.VoxType.Grammar.desktop"
 install -Dm644 packaging/systemd/voxtyped.service \
   "$systemd_dir/voxtyped.service"
 install -Dm644 packaging/systemd/voxtype-tray.service \

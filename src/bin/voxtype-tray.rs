@@ -125,16 +125,30 @@ impl TrayMenu {
             3 => {
                 run_action("Cancel dictation", |client| client.cancel(""));
             }
-            4 =>
+            4 => {
+                #[allow(clippy::redundant_closure_for_method_calls)]
+                run_action("Grammar check", |client| client.check_last_grammar());
+            }
+            5 =>
             {
+                #[allow(clippy::redundant_closure_for_method_calls)]
+                if let Ok(status) = with_client(|client| client.usage_status()) {
+                    let summary = usage_summary(&status);
+                    let _ = std::process::Command::new("notify-send")
+                        .args(["--app-name=VoxType", "VoxType usage", &summary])
+                        .spawn();
+                }
+            }
+            6 => {
+                let _ = std::process::Command::new("voxtype-settings").spawn();
+            }
+            7 => {
                 #[allow(clippy::redundant_closure_for_method_calls)]
                 if let Ok(status) = with_client(|client| client.provider_status()) {
                     let _ = std::process::Command::new("notify-send")
                         .args(["--app-name=VoxType", "VoxType Provider", &status])
                         .spawn();
                 }
-            }
-            5 => {
                 let _ = std::process::Command::new("notify-send")
                     .args([
                         "--app-name=VoxType",
@@ -143,7 +157,7 @@ impl TrayMenu {
                     ])
                     .spawn();
             }
-            6 => {
+            8 => {
                 let _ = std::process::Command::new("systemctl")
                     .args(["--user", "stop", "voxtype-tray.service"])
                     .spawn();
@@ -155,17 +169,19 @@ impl TrayMenu {
 
 fn menu_children() -> Vec<MenuNode> {
     #[allow(clippy::redundant_closure_for_method_calls)]
-    let provider_label = with_client(|client| client.provider_status()).map_or_else(
-        |_| "Provider 状态：不可用".to_owned(),
-        |status| format!("Provider：{status}"),
+    let usage_label = with_client(|client| client.usage_status()).map_or_else(
+        |_| "用量：不可用".to_owned(),
+        |status| usage_summary(&status),
     );
     [
         (1, "开始语音输入".to_owned()),
         (2, "停止语音输入".to_owned()),
         (3, "取消当前录音".to_owned()),
-        (4, provider_label),
-        (5, "诊断状态".to_owned()),
-        (6, "退出托盘".to_owned()),
+        (4, "检查最近输入的语法".to_owned()),
+        (5, usage_label),
+        (6, "设置与 API 密钥".to_owned()),
+        (7, "诊断状态".to_owned()),
+        (8, "退出托盘".to_owned()),
     ]
     .into_iter()
     .map(|(id, label)| {
@@ -178,6 +194,48 @@ fn menu_children() -> Vec<MenuNode> {
         (id, properties, Vec::new())
     })
     .collect()
+}
+
+fn usage_summary(status: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(status) else {
+        return "用量：数据不可用".to_owned();
+    };
+    let Some(providers) = value
+        .get("providers")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return "用量：数据不可用".to_owned();
+    };
+    let summaries = providers
+        .iter()
+        .map(|(id, entry)| {
+            let usage = &entry["usage"];
+            let requests = usage["requests"].as_u64().unwrap_or(0);
+            let audio_millis = usage["audio_millis"].as_u64().unwrap_or(0);
+            let token_reports = usage["token_reports"].as_u64().unwrap_or(0);
+            let tokens = usage["reported_tokens"].as_u64().unwrap_or(0);
+            if token_reports > 0 {
+                format!(
+                    "{id}: {requests} 次 · {} · {tokens} token",
+                    format_audio_duration(audio_millis)
+                )
+            } else {
+                format!(
+                    "{id}: {requests} 次 · {} · token 未报告",
+                    format_audio_duration(audio_millis)
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    if summaries.is_empty() {
+        "用量：无 Provider".to_owned()
+    } else {
+        format!("用量（本次 daemon 会话）：{}", summaries.join("；"))
+    }
+}
+
+fn format_audio_duration(millis: u64) -> String {
+    format!("{}.{:01}s", millis / 1_000, (millis % 1_000) / 100)
 }
 
 fn with_client<T>(operation: impl FnOnce(&Client<'_>) -> zbus::Result<T>) -> zbus::Result<T> {
@@ -232,5 +290,13 @@ mod tests {
     fn listening_state_uses_active_tray_icon() {
         assert!(is_active_status("listening"));
         assert!(!is_active_status("idle"));
+    }
+
+    #[test]
+    fn summarizes_usage_without_inventing_tokens() {
+        let status = r#"{"providers":{"cloud":{"usage":{"requests":2,"audio_millis":1500,"token_reports":0,"reported_tokens":0}}}}"#;
+        let summary = usage_summary(status);
+        assert!(summary.contains("cloud: 2 次 · 1.5s"));
+        assert!(summary.contains("token 未报告"));
     }
 }

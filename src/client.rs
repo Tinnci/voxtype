@@ -36,6 +36,51 @@ impl<'a> Client<'a> {
         self.proxy.call("ProviderStatus", &())
     }
 
+    /// Returns JSON containing session-local consumption and configured quotas.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error when the daemon does not answer.
+    pub fn usage_status(&self) -> zbus::Result<String> {
+        self.proxy.call("UsageStatus", &())
+    }
+
+    /// Returns the most recently inserted transcript held in daemon memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error when the daemon does not answer.
+    pub fn last_transcript(&self) -> zbus::Result<String> {
+        self.proxy.call("LastTranscript", &())
+    }
+
+    /// Returns up to twenty recent transcripts held in daemon memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error when the daemon does not answer.
+    pub fn transcript_history(&self) -> zbus::Result<Vec<String>> {
+        self.proxy.call("TranscriptHistory", &())
+    }
+
+    /// Checks grammar and typography of the most recent transcript.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error when no transcript is available.
+    pub fn check_last_grammar(&self) -> zbus::Result<String> {
+        self.proxy.call("CheckLastGrammar", &())
+    }
+
+    /// Clears the in-memory recent transcript.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error when the daemon does not answer.
+    pub fn clear_history(&self) -> zbus::Result<()> {
+        self.proxy.call("ClearHistory", &())
+    }
+
     /// Starts recording and returns the new session ID.
     ///
     /// # Errors

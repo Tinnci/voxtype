@@ -11,7 +11,7 @@ Categories=Utility;Accessibility;
 StartupNotify=false
 NoDisplay=true
 X-KDE-Shortcuts=Meta+Alt+V
-Actions=Start;Stop;Cancel;
+Actions=Start;Stop;Cancel;Grammar;Settings;
 
 [Desktop Action Start]
 Name=Start Dictation
@@ -31,3 +31,15 @@ Name[zh_CN]=取消语音输入
 Exec=voxtype cancel
 Icon=process-stop
 X-KDE-Shortcuts=Meta+Alt+Escape
+
+[Desktop Action Grammar]
+Name=Check Recent Grammar
+Name[zh_CN]=检查最近输入的语法
+Exec=voxtype grammar last
+Icon=tools-check-spelling
+
+[Desktop Action Settings]
+Name=VoxType Settings
+Name[zh_CN]=VoxType 设置
+Exec=voxtype-settings
+Icon=preferences-desktop-text-to-speech
