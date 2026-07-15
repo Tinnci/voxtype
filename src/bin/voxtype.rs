@@ -182,7 +182,15 @@ fn doctor_provider() -> Result<(), Box<dyn Error>> {
     for (id, provider) in &config.providers {
         let kind = match provider {
             ProviderConfig::Mock { .. } => "mock",
-            ProviderConfig::OpenaiCompatible { .. } => "openai-compatible",
+            ProviderConfig::OpenaiCompatible { secret, .. } => {
+                let secret_state = match voxtype::config::lookup_secret(secret) {
+                    Ok(_) => "ok",
+                    Err(error) if error.code() == "secret.not_found" => "missing",
+                    Err(_) => "unavailable",
+                };
+                println!("provider.{id}.secret={secret_state}");
+                "openai-compatible"
+            }
             ProviderConfig::Command { .. } => "command",
         };
         println!("provider.{id}=configured kind={kind}");
