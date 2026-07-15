@@ -7,6 +7,7 @@ use crate::{
     fcitx::FcitxBridge,
 };
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant};
@@ -496,6 +497,7 @@ fn transcribe_command(
         .env("VOXTYPE_AUDIO_PATH", pcm_path)
         .env("VOXTYPE_LANGUAGE", language)
         .stdout(std::process::Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|error| {
             VoxError::new(
@@ -521,6 +523,10 @@ fn transcribe_command(
             break;
         }
         if Instant::now() >= deadline {
+            let process_group = format!("-{}", child.id());
+            let _ = ProcessCommand::new("kill")
+                .args(["-KILL", "--", &process_group])
+                .status();
             let _ = child.kill();
             let _ = child.wait();
             return Err(VoxError::new(
@@ -637,10 +643,16 @@ mod tests {
 
     #[test]
     fn command_provider_times_out() {
-        let args = vec!["-c".to_owned(), "sleep 2".to_owned()];
+        let marker =
+            std::env::temp_dir().join(format!("voxtype-provider-timeout-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let command = format!("(sleep 2; touch '{}') & wait", marker.to_string_lossy());
+        let args = vec!["-c".to_owned(), command];
         let error = transcribe_command("/bin/sh", &args, 1, Path::new("/tmp/audio.wav"), "zh")
             .expect_err("command must time out");
         assert_eq!(error.code(), "provider.command_timeout");
         assert!(error.is_retryable());
+        std::thread::sleep(Duration::from_millis(1_500));
+        assert!(!marker.exists(), "descendant process survived timeout");
     }
 }
