@@ -117,12 +117,15 @@ impl TrayMenu {
         }
         match id {
             1 => {
-                let _ = with_client(|client| client.toggle(""));
+                let _ = with_client(|client| client.start(""));
             }
             2 => {
+                let _ = with_client(|client| client.stop(""));
+            }
+            3 => {
                 let _ = with_client(|client| client.cancel(""));
             }
-            3 =>
+            4 =>
             {
                 #[allow(clippy::redundant_closure_for_method_calls)]
                 if let Ok(status) = with_client(|client| client.provider_status()) {
@@ -131,7 +134,16 @@ impl TrayMenu {
                         .spawn();
                 }
             }
-            4 => {
+            5 => {
+                let _ = std::process::Command::new("notify-send")
+                    .args([
+                        "--app-name=VoxType",
+                        "VoxType diagnostics",
+                        "Run: voxtype doctor",
+                    ])
+                    .spawn();
+            }
+            6 => {
                 let _ = std::process::Command::new("systemctl")
                     .args(["--user", "stop", "voxtype-tray.service"])
                     .spawn();
@@ -148,10 +160,12 @@ fn menu_children() -> Vec<MenuNode> {
         |status| format!("Provider：{status}"),
     );
     [
-        (1, "开始/停止语音输入".to_owned()),
-        (2, "取消当前录音".to_owned()),
-        (3, provider_label),
-        (4, "退出托盘".to_owned()),
+        (1, "开始语音输入".to_owned()),
+        (2, "停止语音输入".to_owned()),
+        (3, "取消当前录音".to_owned()),
+        (4, provider_label),
+        (5, "诊断状态".to_owned()),
+        (6, "退出托盘".to_owned()),
     ]
     .into_iter()
     .map(|(id, label)| {
@@ -173,7 +187,14 @@ fn with_client<T>(operation: impl FnOnce(&Client<'_>) -> zbus::Result<T>) -> zbu
 }
 
 fn current_status() -> zbus::Result<bool> {
-    with_client(|client| client.status().map(|status| status == "capturing"))
+    with_client(|client| client.status().map(|status| is_active_status(&status)))
+}
+
+fn is_active_status(status: &str) -> bool {
+    matches!(
+        status,
+        "preparing" | "listening" | "finalizing" | "inserting"
+    )
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -191,5 +212,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     watcher.call_method("RegisterStatusNotifierItem", &(TRAY_NAME))?;
     loop {
         thread::sleep(Duration::from_secs(60));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listening_state_uses_active_tray_icon() {
+        assert!(is_active_status("listening"));
+        assert!(!is_active_status("idle"));
     }
 }

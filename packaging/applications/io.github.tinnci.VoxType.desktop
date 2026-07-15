@@ -11,7 +11,19 @@ Categories=Utility;Accessibility;
 StartupNotify=false
 NoDisplay=true
 X-KDE-Shortcuts=Meta+Alt+V
-Actions=Cancel;
+Actions=Start;Stop;Cancel;
+
+[Desktop Action Start]
+Name=Start Dictation
+Name[zh_CN]=开始语音输入
+Exec=voxtype start
+Icon=media-record
+
+[Desktop Action Stop]
+Name=Stop Dictation
+Name[zh_CN]=停止语音输入
+Exec=voxtype stop
+Icon=media-playback-stop
 
 [Desktop Action Cancel]
 Name=Cancel Dictation
