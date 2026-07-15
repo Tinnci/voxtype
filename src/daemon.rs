@@ -220,9 +220,15 @@ impl VoxTypeDaemon {
     }
 
     fn reload_configuration(&mut self) -> fdo::Result<()> {
+        if self.recording.is_some() {
+            return Err(fdo::Error::Failed(
+                "configuration reload requires an idle daemon".to_owned(),
+            ));
+        }
         let config = Config::load_or_create().map_err(map_error)?;
         self.inserter = ClipboardInserter::default().with_restore(config.desktop.restore_clipboard);
         self.config = config;
+        self.provider_health.clear();
         Ok(())
     }
 
