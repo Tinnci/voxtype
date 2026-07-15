@@ -77,12 +77,12 @@ impl TrayItem {
 
     fn activate(&self, x: i32, y: i32) {
         let _ = (x, y);
-        let _ = with_client(|client| client.toggle(""));
+        run_action("Toggle dictation", |client| client.toggle(""));
     }
 
     fn secondary_activate(&self, x: i32, y: i32) {
         let _ = (x, y);
-        let _ = with_client(|client| client.cancel(""));
+        run_action("Cancel dictation", |client| client.cancel(""));
     }
 
     fn context_menu(&self, x: i32, y: i32) {
@@ -117,13 +117,13 @@ impl TrayMenu {
         }
         match id {
             1 => {
-                let _ = with_client(|client| client.start(""));
+                run_action("Start dictation", |client| client.start(""));
             }
             2 => {
-                let _ = with_client(|client| client.stop(""));
+                run_action("Stop dictation", |client| client.stop(""));
             }
             3 => {
-                let _ = with_client(|client| client.cancel(""));
+                run_action("Cancel dictation", |client| client.cancel(""));
             }
             4 =>
             {
@@ -184,6 +184,15 @@ fn with_client<T>(operation: impl FnOnce(&Client<'_>) -> zbus::Result<T>) -> zbu
     let connection = Connection::session()?;
     let client = Client::connect(&connection)?;
     operation(&client)
+}
+
+fn run_action<T>(name: &str, operation: impl FnOnce(&Client<'_>) -> zbus::Result<T>) {
+    if let Err(error) = with_client(operation) {
+        let message = format!("{name} failed: {error}");
+        let _ = std::process::Command::new("notify-send")
+            .args(["--app-name=VoxType", "VoxType", &message])
+            .spawn();
+    }
 }
 
 fn current_status() -> zbus::Result<bool> {
