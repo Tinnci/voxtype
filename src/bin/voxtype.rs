@@ -110,9 +110,15 @@ fn doctor_command() -> Result<(), Box<dyn Error>> {
         }
         None => println!("keyboard.xkb=unavailable"),
     }
-    for service in ["voxtyped.service", "hyprwhspr.service", "ydotool.service"] {
+    for service in [
+        "voxtyped.service",
+        "voxtype-tray.service",
+        "hyprwhspr.service",
+        "ydotool.service",
+    ] {
         println!("service.{service}={}", user_service_state(service));
     }
+    println!("shortcut.kglobalaccel={}", kglobalaccel_state());
     for command in [
         "parec",
         "curl",
@@ -120,6 +126,7 @@ fn doctor_command() -> Result<(), Box<dyn Error>> {
         "wl-paste",
         "ydotool",
         "notify-send",
+        "qdbus6",
     ] {
         if command_exists(command) {
             println!("command.{command}=ok");
@@ -128,6 +135,28 @@ fn doctor_command() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn kglobalaccel_state() -> &'static str {
+    let output = std::process::Command::new("qdbus6")
+        .args([
+            "org.kde.kglobalaccel",
+            "/component/io_github_tinnci_VoxType_desktop",
+            "org.kde.kglobalaccel.Component.shortcutNames",
+        ])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let shortcuts = String::from_utf8_lossy(&output.stdout);
+            if shortcuts.contains("_launch") && shortcuts.contains("Cancel") {
+                "ok"
+            } else {
+                "unregistered"
+            }
+        }
+        Ok(_) => "unregistered",
+        Err(_) => "unavailable",
+    }
 }
 
 fn config_value<'a>(contents: &'a str, key: &str) -> Option<&'a str> {
