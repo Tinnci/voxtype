@@ -32,13 +32,31 @@ impl TrayItem {
     }
 
     #[zbus(property)]
-    fn status(&self) -> &str {
-        "Active"
+    fn status(&self) -> String {
+        current_status().map_or_else(
+            |_| "NeedsAttention".to_owned(),
+            |active| {
+                if active {
+                    "NeedsAttention".to_owned()
+                } else {
+                    "Active".to_owned()
+                }
+            },
+        )
     }
 
     #[zbus(property)]
-    fn icon_name(&self) -> &str {
-        "audio-input-microphone"
+    fn icon_name(&self) -> String {
+        current_status().map_or_else(
+            |_| "audio-input-microphone".to_owned(),
+            |active| {
+                if active {
+                    "microphone-sensitivity-high".to_owned()
+                } else {
+                    "audio-input-microphone".to_owned()
+                }
+            },
+        )
     }
 
     #[zbus(property)]
@@ -65,6 +83,10 @@ fn with_client<T>(operation: impl FnOnce(&Client<'_>) -> zbus::Result<T>) -> zbu
     let connection = Connection::session()?;
     let client = Client::connect(&connection)?;
     operation(&client)
+}
+
+fn current_status() -> zbus::Result<bool> {
+    with_client(|client| client.status().map(|status| status == "capturing"))
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
