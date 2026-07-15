@@ -15,7 +15,6 @@
 
 #include <fcitx-utils/capabilityflags.h>
 #include <fcitx-utils/event.h>
-#include <fcitx-utils/eventloopinterface.h>
 #include <fcitx-utils/log.h>
 #include <fcitx-utils/trackableobject.h>
 #include <fcitx/addonfactory.h>
