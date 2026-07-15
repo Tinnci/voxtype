@@ -7,13 +7,12 @@
 3. Domain and protocol tests that do not link desktop/audio system libraries.
 4. Replaceable adapters without leaking third-party types into core APIs.
 
-## Runtime strategy
+## Current runtime strategy
 
 The MVP starts with standard threads and bounded `std::sync` channels:
 
-- audio callback/reader;
-- provider WebSocket sender;
-- provider WebSocket receiver;
+- `parec` stdout reader;
+- synchronous provider request worker;
 - serialized application state machine;
 - blocking D-Bus adapter as required.
 
@@ -22,28 +21,18 @@ async scheduler is not automatically justified. Tokio may be introduced behind
 an adapter feature if measurements show a clear benefit. Core APIs must remain
 runtime-neutral.
 
-## Initial dependency budget
+## Current dependency budget
 
-The exact crates are selected through Phase 0 spikes. Expected categories:
-
-| Capability | Preferred approach | Budget rule |
+| Capability | Current approach | Budget rule |
 | --- | --- | --- |
-| CLI parsing | small parser or `lexopt`-class crate | avoid derive macros initially |
-| Logging | `log`-compatible facade or tiny project facade | one logging stack |
-| Config | hand-owned schema with `serde` + TOML only if settings justify it | keep derive use outside hot core crates |
-| D-Bus | blocking zbus API candidate | disable unused async/runtime features |
-| Audio | cpal candidate through PipeWire's ALSA compatibility | no direct PipeWire/bindgen until needed |
-| Resampling | benchmark a focused pure-Rust crate | do not write an untested production resampler |
-| Opus | system libopus binding or small maintained wrapper | isolate native code in adapter |
-| HTTP | one blocking client | share TLS implementation with WebSocket if possible |
-| WebSocket | blocking tungstenite-class client | disable URL/TLS features not used |
-| JSON | serde_json candidate only in provider/config adapters | no JSON in domain API |
-| Secret memory | zeroize-class crate if accepted | no custom volatile-memory claims |
-| IDs | OS randomness plus project newtype | avoid a UUID crate if not otherwise needed |
-
-`cpal` through ALSA compatibility is a hypothesis, not a final decision. Direct
-PipeWire may be chosen if latency, device selection, or session behavior is
-materially better and the native build cost is acceptable.
+| CLI parsing | standard library | no parser dependency at current command scale |
+| Config | `serde` + parse-only `toml` | schema is owned by the application package |
+| D-Bus | blocking `zbus`, default features disabled | one IPC/runtime stack |
+| Audio | system `parec` through PipeWire-Pulse | no ALSA/PipeWire headers or build scripts |
+| HTTP/TLS | system `curl` | reuse distribution TLS, proxy, and certificates |
+| JSON | `serde_json` inside the REST provider package | no JSON in core domain APIs |
+| Secrets | system `secret-tool` / Secret Service | secret material is not stored in TOML or argv |
+| Desktop | D-Bus, Fcitx socket, and small system tools | no Qt linkage in Rust binaries |
 
 ## Dependency acceptance checklist
 
@@ -64,23 +53,20 @@ non-security-sensitive standard-library function. Accept specialized crates for
 TLS, audio codecs, resampling, D-Bus, and secure memory rather than inventing
 fragile implementations.
 
-## Feature layout
+## Workspace layout
 
-Planned features should describe adapters, not vague bundles:
+The current workspace intentionally has no feature matrix:
 
-```toml
-[features]
-default = ["desktop-kde", "audio-cpal"]
-desktop-kde = []
-audio-cpal = []
-provider-doubao-unofficial = []
-provider-mock = []
-diagnostics = []
+```text
+voxtype                    application library + thin CLI/daemon/tray binaries
+crates/voxtype-core        dependency-free domain policy and state machine
+crates/voxtype-provider-rest  REST/WAV/JSON adapter
 ```
 
-The unofficial cloud provider should require explicit enablement until its
-licensing and distribution status are settled. CI builds the minimal core,
-default desktop configuration, and each provider feature separately.
+This keeps the fastest policy tests independent from `zbus`, TOML, JSON, and
+desktop code while avoiding feature combinations that would duplicate Cargo
+artifacts. A new package is justified only when a provider brings materially
+different protocol, SDK, native build, or licensing risk.
 
 ## Crate/module strategy
 
@@ -126,17 +112,17 @@ focused package check.
 
 ## Recommended developer loops
 
-After workspace extraction:
+Use these loops now:
 
 ```bash
 # Fast policy/API loop; skips desktop, audio, TLS, and codecs.
 cargo test -p voxtype-core
 
-# One provider and shared contract tests only.
-cargo test -p voxtype-provider-doubao
+# REST provider and its loopback protocol test only.
+cargo test -p voxtype-provider-rest
 
-# Daemon type-check without building every optional provider.
-cargo check -p voxtype-app --features provider-doubao
+# Application type-check without linking release binaries.
+cargo check -p voxtype
 
 # Full integration only before merging.
 cargo test --workspace
@@ -168,9 +154,9 @@ build speed is secondary to local iteration speed.
 Baseline these after the first real adapters land:
 
 ```bash
-cargo clean && /usr/bin/time -v cargo check --no-default-features
-/usr/bin/time -v cargo check
-/usr/bin/time -v cargo test --no-default-features
+cargo clean && /usr/bin/time -v cargo check -p voxtype-core
+/usr/bin/time -v cargo check -p voxtype
+/usr/bin/time -v cargo test -p voxtype-provider-rest
 cargo tree -d
 cargo tree -e features
 cargo build --release
