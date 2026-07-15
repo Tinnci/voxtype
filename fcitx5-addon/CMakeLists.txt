@@ -8,7 +8,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Fcitx5Core 5.1.7 REQUIRED)
 include("${Fcitx5Utils_DIR}/Fcitx5Macros.cmake")
 
-add_fcitx5_addon(voxtypebridge voxtypebridge.cpp)
+add_library(voxtypebridge MODULE voxtypebridge.cpp)
+set_target_properties(voxtypebridge PROPERTIES FCITX_ADDON TRUE)
 target_link_libraries(voxtypebridge Fcitx5::Core)
 target_compile_options(voxtypebridge PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
