@@ -31,6 +31,7 @@ providers, desktop integration, audio capture, and text insertion replaceable.
 - [API contracts](docs/api-contracts.md)
 - [Doubao protocol analysis](docs/doubao-api-analysis.md)
 - [Dependency and build policy](docs/dependencies-and-builds.md)
+- [Local KDE input-method audit](docs/local-kde-ime-audit.md)
 - [Delivery roadmap](docs/roadmap.md)
 - [ADR 0001: Rust](docs/decisions/0001-rust.md)
 - [ADR 0002: system boundaries and Cargo workspace](docs/decisions/0002-system-boundaries-and-workspace.md)

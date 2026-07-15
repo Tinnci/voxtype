@@ -1,0 +1,27 @@
+[Unit]
+Description=VoxType voice input daemon
+Documentation=https://github.com/Tinnci/voxtype
+After=graphical-session.target pipewire-pulse.service ydotool.service
+Wants=pipewire-pulse.service ydotool.service
+
+[Service]
+Type=dbus
+BusName=io.github.tinnci.VoxType
+ExecStart=%h/.local/bin/voxtyped
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target

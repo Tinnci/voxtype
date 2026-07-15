@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=io.github.tinnci.VoxType
+Exec=@BINDIR@/voxtyped
+SystemdService=voxtyped.service

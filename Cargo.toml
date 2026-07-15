@@ -7,12 +7,29 @@ description = "KDE-first voice typing for Linux"
 repository = "https://github.com/Tinnci/voxtype"
 publish = false
 
-[dependencies]
+[workspace]
+members = ["crates/voxtype-core"]
+resolver = "3"
 
-[lints.rust]
+[dependencies]
+voxtype-core = { path = "crates/voxtype-core" }
+zbus = { version = "5.13.2", default-features = false, features = ["async-io", "blocking-api"] }
+
+[[bin]]
+name = "voxtype"
+path = "src/bin/voxtype.rs"
+
+[[bin]]
+name = "voxtyped"
+path = "src/bin/voxtyped.rs"
+
+[lints]
+workspace = true
+
+[workspace.lints.rust]
 unsafe_code = "forbid"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = "warn"
 pedantic = "warn"
 

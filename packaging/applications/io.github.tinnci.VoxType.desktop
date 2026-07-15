@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Name=VoxType Voice Input
+Name[zh_CN]=VoxType 语音输入
+Comment=Toggle KDE-first voice typing
+Comment[zh_CN]=切换 KDE 优先的语音输入
+Exec=voxtype toggle
+Icon=audio-input-microphone
+Terminal=false
+Categories=Utility;Accessibility;
+StartupNotify=false
+NoDisplay=true
+X-KDE-Shortcuts=Meta+Alt+V
+Actions=Cancel;
+
+[Desktop Action Cancel]
+Name=Cancel Dictation
+Name[zh_CN]=取消语音输入
+Exec=voxtype cancel
+Icon=process-stop
+X-KDE-Shortcuts=Meta+Alt+Escape
