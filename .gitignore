@@ -1,6 +1,6 @@
 /target/
+/build/
 *.log
 .env
 .env.*
 !.env.example
-

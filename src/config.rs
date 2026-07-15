@@ -16,6 +16,7 @@ default_profile = "test"
 [desktop]
 restore_clipboard = true
 retain_recordings = false
+insertion_backend = "fcitx"
 
 [audio]
 minimum_duration_millis = 250
@@ -48,6 +49,7 @@ pub struct Config {
 pub struct DesktopConfig {
     pub restore_clipboard: bool,
     pub retain_recordings: bool,
+    pub insertion_backend: InsertionBackend,
 }
 
 impl Default for DesktopConfig {
@@ -55,8 +57,18 @@ impl Default for DesktopConfig {
         Self {
             restore_clipboard: true,
             retain_recordings: false,
+            insertion_backend: InsertionBackend::Fcitx,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum InsertionBackend {
+    #[default]
+    Fcitx,
+    Clipboard,
+    Auto,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -2,8 +2,9 @@
 
 use crate::{
     audio::{Recording, RecordingResult},
-    config::{Config, ProviderConfig, lookup_secret},
+    config::{Config, InsertionBackend, ProviderConfig, lookup_secret},
     desktop::ClipboardInserter,
+    fcitx::FcitxBridge,
 };
 use std::fs;
 use std::path::Path;
@@ -22,7 +23,20 @@ pub struct VoxTypeDaemon {
     inserter: ClipboardInserter,
     config: Config,
     active_profile: Option<String>,
+    armed_insertion: Option<ArmedInsertion>,
     quit: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArmedInsertion {
+    Fcitx,
+    Clipboard,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompletedInsertion {
+    backend: &'static str,
+    clipboard_restored: bool,
 }
 
 #[zbus::interface(name = "io.github.tinnci.VoxType1")]
@@ -59,6 +73,26 @@ impl VoxTypeDaemon {
             return Err(fdo::Error::Failed("invalid start effect".to_owned()));
         };
 
+        let armed = match self.config.desktop.insertion_backend {
+            InsertionBackend::Fcitx => FcitxBridge.arm(&session).map(|()| ArmedInsertion::Fcitx),
+            InsertionBackend::Clipboard => Ok(ArmedInsertion::Clipboard),
+            InsertionBackend::Auto => Ok(if FcitxBridge.arm(&session).is_ok() {
+                ArmedInsertion::Fcitx
+            } else {
+                ArmedInsertion::Clipboard
+            }),
+        };
+        match armed {
+            Ok(armed) => self.armed_insertion = Some(armed),
+            Err(error) => {
+                let _effect = self.machine.apply(Command::Fail {
+                    session,
+                    error: error.clone(),
+                });
+                return Err(map_error(error));
+            }
+        }
+
         match Recording::start() {
             Ok(recording) => {
                 self.recording = Some(recording);
@@ -72,6 +106,10 @@ impl VoxTypeDaemon {
                 Ok(session.to_string())
             }
             Err(error) => {
+                if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
+                    FcitxBridge.cancel(&session);
+                }
+                self.armed_insertion = None;
                 let domain_error = voxtype_core::VoxError::new(
                     voxtype_core::ErrorCategory::Unavailable,
                     "audio.start_failed",
@@ -101,10 +139,14 @@ impl VoxTypeDaemon {
             .stop()
             .map_err(|error| fdo::Error::Failed(format!("failed to stop capture: {error}")))?;
         let response = self.finish_recognition(&active, &result);
+        if response.is_err() && self.armed_insertion == Some(ArmedInsertion::Fcitx) {
+            FcitxBridge.cancel(&active);
+        }
         if !self.config.desktop.retain_recordings {
             let _result = fs::remove_file(&result.path);
         }
         self.active_profile = None;
+        self.armed_insertion = None;
         response
     }
 
@@ -119,12 +161,18 @@ impl VoxTypeDaemon {
     fn cancel(&mut self, session: &str) -> fdo::Result<()> {
         let active = self.active_session_id(session)?;
         self.machine
-            .apply(Command::Cancel { session: active })
+            .apply(Command::Cancel {
+                session: active.clone(),
+            })
             .map_err(map_error)?;
         if let Some(recording) = self.recording.take() {
             recording.cancel();
         }
+        if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
+            FcitxBridge.cancel(&active);
+        }
         self.active_profile = None;
+        self.armed_insertion = None;
         notify("VoxType", "Dictation cancelled");
         Ok(())
     }
@@ -156,6 +204,11 @@ impl VoxTypeDaemon {
         if let Some(recording) = self.recording.take() {
             recording.cancel();
         }
+        if self.armed_insertion == Some(ArmedInsertion::Fcitx)
+            && let Some(session) = self.machine.state().session()
+        {
+            FcitxBridge.cancel(session);
+        }
         self.quit = true;
     }
 
@@ -181,6 +234,7 @@ impl VoxTypeDaemon {
             inserter,
             config,
             active_profile: None,
+            armed_insertion: None,
             quit: false,
         })
     }
@@ -212,6 +266,9 @@ impl VoxTypeDaemon {
         recording: &RecordingResult,
     ) -> fdo::Result<String> {
         if recording.duration_millis < self.config.audio.minimum_duration_millis {
+            if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
+                FcitxBridge.cancel(session);
+            }
             self.machine
                 .apply(Command::NoSpeech {
                     session: session.clone(),
@@ -259,9 +316,7 @@ impl VoxTypeDaemon {
                             "state machine did not request insertion".to_owned(),
                         ));
                     };
-                    let insertion = self.inserter.insert(&text).map_err(|error| {
-                        fdo::Error::Failed(format!("text insertion failed: {error}"))
-                    })?;
+                    let insertion = self.insert_text(session, &text).map_err(map_error)?;
                     self.machine
                         .apply(Command::InsertionComplete {
                             session: session.clone(),
@@ -345,6 +400,36 @@ impl VoxTypeDaemon {
                 )
                 .map(|result| result.text)
             }
+        }
+    }
+
+    fn insert_text(&self, session: &SessionId, text: &str) -> Result<CompletedInsertion, VoxError> {
+        match self.armed_insertion {
+            Some(ArmedInsertion::Fcitx) => {
+                FcitxBridge.commit(session, text)?;
+                Ok(CompletedInsertion {
+                    backend: "fcitx5",
+                    clipboard_restored: true,
+                })
+            }
+            Some(ArmedInsertion::Clipboard) => {
+                let result = self.inserter.insert(text).map_err(|error| {
+                    VoxError::new(
+                        ErrorCategory::Unavailable,
+                        "desktop.insertion_failed",
+                        error.to_string(),
+                    )
+                })?;
+                Ok(CompletedInsertion {
+                    backend: result.backend,
+                    clipboard_restored: result.clipboard_restored,
+                })
+            }
+            None => Err(VoxError::new(
+                ErrorCategory::InvalidState,
+                "desktop.not_armed",
+                "no text insertion target was armed for the session",
+            )),
         }
     }
 }

@@ -3,6 +3,7 @@ use std::error::Error;
 use std::io::{self, Read};
 use voxtype::client::Client;
 use voxtype::config::{Config, config_path, store_secret};
+use voxtype::fcitx::FcitxBridge;
 use zbus::blocking::Connection;
 
 fn main() {
@@ -28,6 +29,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             arguments.next().as_deref().unwrap_or(""),
             arguments.next().as_deref().unwrap_or(""),
         );
+    }
+    if command == "doctor" {
+        return doctor_command();
     }
 
     let connection = Connection::session()?;
@@ -60,8 +64,44 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
+        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
     );
+}
+
+fn doctor_command() -> Result<(), Box<dyn Error>> {
+    let config = Config::load_or_create()?;
+    println!(
+        "config=ok schema={} profiles={} providers={}",
+        config.schema_version,
+        config.profiles.len(),
+        config.providers.len()
+    );
+    match FcitxBridge.ping() {
+        Ok(()) => println!("fcitx5-bridge=ok"),
+        Err(error) => println!("fcitx5-bridge=unavailable code={}", error.code()),
+    }
+    for command in [
+        "parec",
+        "curl",
+        "wl-copy",
+        "wl-paste",
+        "ydotool",
+        "notify-send",
+    ] {
+        if command_exists(command) {
+            println!("command.{command}=ok");
+        } else {
+            println!("command.{command}=missing");
+        }
+    }
+    Ok(())
+}
+
+fn command_exists(command: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|directory| directory.join(command).is_file())
 }
 
 fn config_command(action: &str) -> Result<(), Box<dyn Error>> {
