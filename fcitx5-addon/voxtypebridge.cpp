@@ -140,7 +140,7 @@ private:
         const auto command = field(message, 0);
         std::string response;
         if (command == "PING") {
-            response = "OK\0ready";
+            response = std::string{"OK\0ready", 8};
         } else if (command == "ARM") {
             response = arm(field(message, 1));
         } else if (command == "COMMIT") {
