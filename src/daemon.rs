@@ -9,6 +9,7 @@ use crate::{
 use std::fs;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
+use std::time::{Duration, Instant};
 use voxtype_core::{
     Command, CommandEffect, ErrorCategory, ReplayPolicy, SessionId, SessionMachine, StartRequest,
     TriggerMode, VoxError,
@@ -24,6 +25,7 @@ pub struct VoxTypeDaemon {
     config: Config,
     active_profile: Option<String>,
     armed_insertion: Option<ArmedInsertion>,
+    provider_health: std::collections::BTreeMap<String, ProviderHealthState>,
     quit: bool,
 }
 
@@ -37,6 +39,25 @@ enum ArmedInsertion {
 struct CompletedInsertion {
     backend: &'static str,
     clipboard_restored: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ProviderHealthState {
+    consecutive_failures: u32,
+    blocked_until: Option<Instant>,
+}
+
+impl ProviderHealthState {
+    fn is_available_at(&self, now: Instant) -> bool {
+        self.blocked_until.is_none_or(|deadline| now >= deadline)
+    }
+
+    fn record_retryable_failure_at(&mut self, now: Instant) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if self.consecutive_failures >= 3 {
+            self.blocked_until = Some(now + Duration::from_secs(60));
+        }
+    }
 }
 
 #[zbus::interface(name = "io.github.tinnci.VoxType1")]
@@ -235,6 +256,7 @@ impl VoxTypeDaemon {
             config,
             active_profile: None,
             armed_insertion: None,
+            provider_health: std::collections::BTreeMap::new(),
             quit: false,
         })
     }
@@ -298,12 +320,18 @@ impl VoxTypeDaemon {
         let language = profile.language.clone();
 
         let mut last_error = None;
-        for (index, provider_id) in providers.iter().enumerate() {
-            if index > 0 && replay != ReplayPolicy::BufferedWithConsent {
+        let mut attempted_provider = false;
+        for provider_id in &providers {
+            if !self.provider_is_available(provider_id) {
+                continue;
+            }
+            if attempted_provider && replay != ReplayPolicy::BufferedWithConsent {
                 break;
             }
+            attempted_provider = true;
             match self.transcribe_with(provider_id, &recording.path, &language) {
                 Ok(text) => {
+                    self.provider_succeeded(provider_id);
                     let effect = self
                         .machine
                         .apply(Command::TranscriptReady {
@@ -332,6 +360,7 @@ impl VoxTypeDaemon {
                 }
                 Err(error) => {
                     let retryable = error.is_retryable();
+                    self.provider_failed(provider_id, retryable);
                     last_error = Some(error);
                     if !retryable {
                         break;
@@ -354,6 +383,27 @@ impl VoxTypeDaemon {
         });
         notify("VoxType recognition failed", &message);
         Err(fdo::Error::Failed(message))
+    }
+
+    fn provider_is_available(&self, provider_id: &str) -> bool {
+        self.provider_health
+            .get(provider_id)
+            .is_none_or(|health| health.is_available_at(Instant::now()))
+    }
+
+    fn provider_succeeded(&mut self, provider_id: &str) {
+        self.provider_health.remove(provider_id);
+    }
+
+    fn provider_failed(&mut self, provider_id: &str, retryable: bool) {
+        if !retryable {
+            return;
+        }
+        let health = self
+            .provider_health
+            .entry(provider_id.to_owned())
+            .or_default();
+        health.record_retryable_failure_at(Instant::now());
     }
 
     fn transcribe_with(
@@ -444,4 +494,23 @@ fn notify(summary: &str, body: &str) {
     let _result = ProcessCommand::new("notify-send")
         .args(["--app-name=VoxType", summary, body])
         .spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_health_blocks_after_three_retryable_failures() {
+        let now = Instant::now();
+        let mut health = ProviderHealthState::default();
+
+        health.record_retryable_failure_at(now);
+        health.record_retryable_failure_at(now);
+        assert!(health.is_available_at(now));
+
+        health.record_retryable_failure_at(now);
+        assert!(!health.is_available_at(now + Duration::from_secs(59)));
+        assert!(health.is_available_at(now + Duration::from_secs(60)));
+    }
 }

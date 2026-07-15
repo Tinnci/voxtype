@@ -112,12 +112,11 @@ fn request(
     let output = child.wait_with_output().map_err(io_error)?;
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr);
-        return Err(VoxError::new(
-            ErrorCategory::Unavailable,
-            "provider.http_failed",
-            sanitize_transport_error(&message),
-        )
-        .with_retryable(true));
+        let message_text = sanitize_transport_error(&message);
+        let (category, retryable) = classify_http_failure(&message_text);
+        return Err(
+            VoxError::new(category, "provider.http_failed", message_text).with_retryable(retryable),
+        );
     }
 
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
@@ -142,6 +141,16 @@ fn request(
     Ok(Transcription {
         text: text.to_owned(),
     })
+}
+
+fn classify_http_failure(message: &str) -> (ErrorCategory, bool) {
+    if message.contains("401") || message.contains("403") {
+        (ErrorCategory::Authentication, false)
+    } else if message.contains("429") {
+        (ErrorCategory::RateLimited, true)
+    } else {
+        (ErrorCategory::Unavailable, true)
+    }
 }
 
 fn validate_endpoint(endpoint: &str) -> Result<(), VoxError> {
@@ -208,6 +217,22 @@ fn internal(message: &'static str) -> VoxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_http_failures_for_routing() {
+        assert_eq!(
+            classify_http_failure("curl: server returned error: 401"),
+            (ErrorCategory::Authentication, false)
+        );
+        assert_eq!(
+            classify_http_failure("curl: server returned error: 429"),
+            (ErrorCategory::RateLimited, true)
+        );
+        assert_eq!(
+            classify_http_failure("curl: connection reset"),
+            (ErrorCategory::Unavailable, true)
+        );
+    }
     use std::io::Read;
     use std::net::TcpListener;
     use std::thread;
