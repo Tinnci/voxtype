@@ -3,7 +3,7 @@ use std::error::Error;
 use std::io::{self, Read};
 use voxtype::audio::Recording;
 use voxtype::client::Client;
-use voxtype::config::{Config, config_path, store_secret};
+use voxtype::config::{Config, ProviderConfig, config_path, store_secret};
 use voxtype::fcitx::FcitxBridge;
 use zbus::blocking::Connection;
 
@@ -84,16 +84,31 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype fcitx-focus\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
+        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype fcitx-focus\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio|shortcut|insertion|provider|all]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
     );
 }
 
 fn doctor_command(section: Option<&str>) -> Result<(), Box<dyn Error>> {
-    if section == Some("audio") {
-        return doctor_audio();
-    }
-    if section.is_some() {
-        return Err("usage: voxtype doctor [audio]".into());
+    match section {
+        Some("audio") => return doctor_audio(),
+        Some("shortcut") => {
+            println!("shortcut.kglobalaccel={}", kglobalaccel_state());
+            return Ok(());
+        }
+        Some("insertion") => {
+            require_idle_daemon("insertion doctor")?;
+            let target = FcitxBridge.probe()?;
+            println!(
+                "insertion.fcitx=ok program={} frontend={}",
+                target.program, target.frontend
+            );
+            return Ok(());
+        }
+        Some("provider") => return doctor_provider(),
+        Some("all") | None => {}
+        Some(_) => {
+            return Err("usage: voxtype doctor [audio|shortcut|insertion|provider|all]".into());
+        }
     }
     let config = Config::load_or_create()?;
     println!(
@@ -162,20 +177,26 @@ fn doctor_command(section: Option<&str>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn doctor_audio() -> Result<(), Box<dyn Error>> {
+fn doctor_provider() -> Result<(), Box<dyn Error>> {
+    let config = Config::load_or_create()?;
+    for (id, provider) in &config.providers {
+        let kind = match provider {
+            ProviderConfig::Mock { .. } => "mock",
+            ProviderConfig::OpenaiCompatible { .. } => "openai-compatible",
+            ProviderConfig::Command { .. } => "command",
+        };
+        println!("provider.{id}=configured kind={kind}");
+    }
     if let Ok(connection) = Connection::session()
         && let Ok(client) = Client::connect(&connection)
     {
-        let status = client.status()?;
-        if matches!(
-            status.as_str(),
-            "preparing" | "listening" | "finalizing" | "inserting"
-        ) {
-            return Err(
-                format!("audio doctor requires an idle daemon; current state={status}").into(),
-            );
-        }
+        println!("provider.health={}", client.provider_status()?);
     }
+    Ok(())
+}
+
+fn doctor_audio() -> Result<(), Box<dyn Error>> {
+    require_idle_daemon("audio doctor")?;
     let recording = Recording::start()?;
     std::thread::sleep(std::time::Duration::from_millis(500));
     let result = recording.stop()?;
@@ -188,6 +209,20 @@ fn doctor_audio() -> Result<(), Box<dyn Error>> {
         "audio.capture=ok bytes={} duration_ms={} format=s16le rate=16000 channels=1",
         result.bytes, result.duration_millis
     );
+    Ok(())
+}
+
+fn require_idle_daemon(operation: &str) -> Result<(), Box<dyn Error>> {
+    if let Ok(connection) = Connection::session()
+        && let Ok(client) = Client::connect(&connection)
+    {
+        let status = client.status()?;
+        if status != "idle" {
+            return Err(
+                format!("{operation} requires an idle daemon; current state={status}").into(),
+            );
+        }
+    }
     Ok(())
 }
 
