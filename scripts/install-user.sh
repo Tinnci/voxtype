@@ -12,10 +12,13 @@ cargo build --release --workspace --bins
 
 install -Dm755 target/release/voxtype "$bindir/voxtype"
 install -Dm755 target/release/voxtyped "$bindir/voxtyped"
+install -Dm755 target/release/voxtype-tray "$bindir/voxtype-tray"
 install -Dm644 packaging/applications/io.github.tinnci.VoxType.desktop \
   "$applications_dir/io.github.tinnci.VoxType.desktop"
 install -Dm644 packaging/systemd/voxtyped.service \
   "$systemd_dir/voxtyped.service"
+install -Dm644 packaging/systemd/voxtype-tray.service \
+  "$systemd_dir/voxtype-tray.service"
 
 mkdir -p "$dbus_services_dir"
 sed "s|@BINDIR@|$bindir|g" \
@@ -24,7 +27,9 @@ sed "s|@BINDIR@|$bindir|g" \
 
 systemctl --user daemon-reload
 systemctl --user enable voxtyped.service
+systemctl --user enable voxtype-tray.service
 systemctl --user restart voxtyped.service
+systemctl --user restart voxtype-tray.service
 kbuildsycoca6 --noincremental
 
 printf 'Installed VoxType for %s\n' "$USER"

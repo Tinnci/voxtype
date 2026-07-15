@@ -1,0 +1,23 @@
+[Unit]
+Description=VoxType Plasma tray indicator
+Documentation=https://github.com/Tinnci/voxtype
+After=graphical-session.target voxtyped.service
+Wants=voxtyped.service
+
+[Service]
+Type=dbus
+BusName=io.github.tinnci.VoxType.Tray
+ExecStart=%h/.local/bin/voxtype-tray
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=graphical-session.target

@@ -26,6 +26,10 @@ path = "src/bin/voxtype.rs"
 name = "voxtyped"
 path = "src/bin/voxtyped.rs"
 
+[[bin]]
+name = "voxtype-tray"
+path = "src/bin/voxtype-tray.rs"
+
 [lints]
 workspace = true
 
