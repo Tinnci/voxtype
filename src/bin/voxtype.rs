@@ -163,6 +163,19 @@ fn doctor_command(section: Option<&str>) -> Result<(), Box<dyn Error>> {
 }
 
 fn doctor_audio() -> Result<(), Box<dyn Error>> {
+    if let Ok(connection) = Connection::session()
+        && let Ok(client) = Client::connect(&connection)
+    {
+        let status = client.status()?;
+        if matches!(
+            status.as_str(),
+            "preparing" | "listening" | "finalizing" | "inserting"
+        ) {
+            return Err(
+                format!("audio doctor requires an idle daemon; current state={status}").into(),
+            );
+        }
+    }
     let recording = Recording::start()?;
     std::thread::sleep(std::time::Duration::from_millis(500));
     let result = recording.stop()?;

@@ -50,6 +50,7 @@ Verify the complete local stack:
 
 ```bash
 voxtype doctor
+voxtype doctor audio
 voxtype fcitx-focus
 voxtype providers
 ```
