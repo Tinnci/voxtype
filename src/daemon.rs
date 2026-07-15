@@ -628,4 +628,13 @@ mod tests {
             .expect("command provider output");
         assert_eq!(text, "本地文本");
     }
+
+    #[test]
+    fn command_provider_times_out() {
+        let args = vec!["-c".to_owned(), "sleep 2".to_owned()];
+        let error = transcribe_command("/bin/sh", &args, 1, Path::new("/tmp/audio.wav"), "zh")
+            .expect_err("command must time out");
+        assert_eq!(error.code(), "provider.command_timeout");
+        assert!(error.is_retryable());
+    }
 }
