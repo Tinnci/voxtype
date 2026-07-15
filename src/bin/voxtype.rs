@@ -80,6 +80,38 @@ fn doctor_command() -> Result<(), Box<dyn Error>> {
         Ok(()) => println!("fcitx5-bridge=ok"),
         Err(error) => println!("fcitx5-bridge=unavailable code={}", error.code()),
     }
+    println!(
+        "session.wayland={}",
+        std::env::var_os("WAYLAND_DISPLAY").is_some()
+    );
+    println!(
+        "input.xmodifiers={}",
+        std::env::var("XMODIFIERS").unwrap_or_else(|_| "unset".to_owned())
+    );
+    for (name, value) in [
+        ("QT_IM_MODULE", "QT_IM_MODULE"),
+        ("GTK_IM_MODULE", "GTK_IM_MODULE"),
+    ] {
+        println!(
+            "input.{name}={}",
+            std::env::var(value).unwrap_or_else(|_| "unset".to_owned())
+        );
+    }
+    let kxkbrc = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join(".config/kxkbrc"));
+    match kxkbrc.and_then(|path| std::fs::read_to_string(path).ok()) {
+        Some(contents) => {
+            let model = config_value(&contents, "Model").unwrap_or("unset");
+            let layout = config_value(&contents, "LayoutList").unwrap_or("unset");
+            println!("keyboard.xkb_model={model}");
+            println!("keyboard.xkb_layout={layout}");
+        }
+        None => println!("keyboard.xkb=unavailable"),
+    }
+    for service in ["voxtyped.service", "hyprwhspr.service", "ydotool.service"] {
+        println!("service.{service}={}", user_service_state(service));
+    }
     for command in [
         "parec",
         "curl",
@@ -95,6 +127,23 @@ fn doctor_command() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn config_value<'a>(contents: &'a str, key: &str) -> Option<&'a str> {
+    contents.lines().find_map(|line| {
+        let (name, value) = line.split_once('=')?;
+        (name.trim() == key).then_some(value.trim())
+    })
+}
+
+fn user_service_state(service: &str) -> String {
+    std::process::Command::new("systemctl")
+        .args(["--user", "is-active", service])
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|state| !state.is_empty())
+        .unwrap_or_else(|| "unavailable".to_owned())
 }
 
 fn command_exists(command: &str) -> bool {
