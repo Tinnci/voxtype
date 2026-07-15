@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(Fcitx5Core 5.1.21 REQUIRED)
+find_package(Fcitx5Core 5.1.7 REQUIRED)
 include("${Fcitx5Utils_DIR}/Fcitx5Macros.cmake")
 
 add_fcitx5_addon(voxtypebridge voxtypebridge.cpp)

@@ -18,3 +18,25 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-targets --all-features
+
+  linux-integration:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            cmake \
+            desktop-file-utils \
+            libfcitx5core-dev \
+            libfcitx5utils-dev \
+            ninja-build
+      - name: Validate integration scripts and metadata
+        run: |
+          bash -n scripts/install-user.sh scripts/uninstall-user.sh scripts/install-fcitx-addon.sh
+          desktop-file-validate packaging/applications/io.github.tinnci.VoxType.desktop
+      - name: Build Fcitx5 addon with strict warnings
+        run: |
+          cmake -S fcitx5-addon -B build/fcitx5-addon -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/fcitx5-addon
