@@ -158,11 +158,56 @@ fn recording_path() -> io::Result<PathBuf> {
     Ok(directory.join(format!("recording-{}-{timestamp}.pcm", std::process::id())))
 }
 
+/// Removes abandoned `VoxType` PCM captures from the current runtime directory.
+///
+/// Files outside the `recording-*.pcm` namespace are never touched.
+pub fn cleanup_stale_recordings() {
+    let runtime =
+        std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+    cleanup_directory(&runtime.join("voxtype"));
+}
+
+fn cleanup_directory(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("recording-") && name.ends_with(".pcm") {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn duration_uses_sixteen_kilohertz_mono_i16() {
         let bytes = 32_000_u64;
         assert_eq!(bytes.saturating_mul(1_000) / 32_000, 1_000);
+    }
+
+    #[test]
+    fn stale_cleanup_only_removes_recordings() {
+        let directory = std::env::temp_dir().join(format!(
+            "voxtype-cleanup-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("create test directory");
+        fs::write(directory.join("recording-old.pcm"), b"audio").expect("write recording");
+        fs::write(directory.join("fcitx.sock"), b"sentinel").expect("write sentinel");
+
+        cleanup_directory(&directory);
+
+        assert!(!directory.join("recording-old.pcm").exists());
+        assert!(directory.join("fcitx.sock").exists());
+        fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

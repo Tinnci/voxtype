@@ -1,7 +1,7 @@
 //! D-Bus daemon interface.
 
 use crate::{
-    audio::{Recording, RecordingResult},
+    audio::{Recording, RecordingResult, cleanup_stale_recordings},
     config::{Config, InsertionBackend, ProviderConfig, lookup_secret},
     desktop::ClipboardInserter,
     fcitx::FcitxBridge,
@@ -264,6 +264,9 @@ impl VoxTypeDaemon {
     /// be created, parsed, or validated.
     pub fn load() -> Result<Self, VoxError> {
         let config = Config::load_or_create()?;
+        if !config.desktop.retain_recordings {
+            cleanup_stale_recordings();
+        }
         let inserter = ClipboardInserter::default().with_restore(config.desktop.restore_clipboard);
         Ok(Self {
             machine: SessionMachine::default(),
