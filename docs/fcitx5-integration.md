@@ -41,6 +41,17 @@ test -S "$XDG_RUNTIME_DIR/voxtype/fcitx.sock"
 voxtype doctor
 ```
 
+For a manual end-to-end check, focus a normal non-password text field and run
+the following command from a separately prepared terminal or shortcut:
+
+```bash
+voxtype fcitx-insert-test 'VoxType Fcitx 原生提交测试'
+```
+
+The command uses the native bridge only. It does not mutate the clipboard or
+fall back to synthetic paste. `queued=true` proves bridge acceptance; the text
+appearing in the focused field is the required frontend delivery evidence.
+
 ## Backend selection
 
 `[desktop].insertion_backend` accepts:

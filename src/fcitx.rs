@@ -62,6 +62,28 @@ impl FcitxBridge {
         Ok(target)
     }
 
+    /// Arms and queues a diagnostic commit for the currently focused context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for insecure or missing focus and for commit rejection.
+    pub fn commit_test(self, text: &str) -> Result<FcitxTarget, VoxError> {
+        if text.trim().is_empty() {
+            return Err(VoxError::new(
+                ErrorCategory::Protocol,
+                "fcitx.empty_test",
+                "diagnostic text is empty",
+            ));
+        }
+        let session = SessionId::from_counter(u64::MAX - 1);
+        let target = self.arm_target(&session)?;
+        if let Err(error) = self.commit(&session, text) {
+            self.cancel(&session);
+            return Err(error);
+        }
+        Ok(target)
+    }
+
     /// Commits text only when the context armed for this session still has focus.
     ///
     /// # Errors
@@ -222,5 +244,13 @@ mod tests {
         let target = parse_arm_response(b"OK\0armed\0\0wayland").expect("target response");
         assert_eq!(target.program, "unknown");
         assert_eq!(target.frontend, "wayland");
+    }
+
+    #[test]
+    fn rejects_empty_diagnostic_commit() {
+        let error = FcitxBridge
+            .commit_test("  ")
+            .expect_err("empty diagnostic commit must fail locally");
+        assert_eq!(error.code(), "fcitx.empty_test");
     }
 }
