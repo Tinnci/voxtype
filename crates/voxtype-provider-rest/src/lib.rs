@@ -153,8 +153,13 @@ fn classify_http_failure(message: &str) -> (ErrorCategory, bool) {
     }
 }
 
-fn validate_endpoint(endpoint: &str) -> Result<(), VoxError> {
-    if endpoint.starts_with("https://") || endpoint.starts_with("http://127.0.0.1:") {
+/// Validates that a provider endpoint uses HTTPS, except for loopback tests.
+///
+/// # Errors
+///
+/// Returns a configuration error for remote plain HTTP or unsupported schemes.
+pub fn validate_endpoint(endpoint: &str) -> Result<(), VoxError> {
+    if endpoint.starts_with("https://") || is_loopback_http(endpoint) {
         Ok(())
     } else {
         Err(VoxError::new(
@@ -163,6 +168,19 @@ fn validate_endpoint(endpoint: &str) -> Result<(), VoxError> {
             "provider endpoint must use HTTPS or loopback HTTP",
         ))
     }
+}
+
+fn is_loopback_http(endpoint: &str) -> bool {
+    let Some(rest) = endpoint.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    authority == "localhost"
+        || authority.starts_with("localhost:")
+        || authority == "127.0.0.1"
+        || authority.starts_with("127.0.0.1:")
+        || authority == "[::1]"
+        || authority.starts_with("[::1]:")
 }
 
 fn pcm_to_wav(pcm_path: &Path) -> io::Result<PathBuf> {
@@ -258,6 +276,9 @@ mod tests {
     fn rejects_plain_remote_http() {
         assert!(validate_endpoint("http://example.com/asr").is_err());
         assert!(validate_endpoint("http://127.0.0.1:8080/asr").is_ok());
+        assert!(validate_endpoint("http://localhost/asr").is_ok());
+        assert!(validate_endpoint("http://[::1]:8080/asr").is_ok());
+        assert!(validate_endpoint("http://127.0.0.1.example/asr").is_err());
     }
 
     #[test]

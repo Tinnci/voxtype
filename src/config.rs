@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use voxtype_core::{ErrorCategory, ReplayPolicy, VoxError};
 use voxtype_provider_rest::SecretString;
+use voxtype_provider_rest::validate_endpoint;
 
 const DEFAULT_CONFIG: &str = r#"schema_version = 1
 default_profile = "test"
@@ -213,6 +214,9 @@ impl Config {
                     "provider timeout must be between 1 and 300 seconds",
                 ));
             }
+            if let ProviderConfig::OpenaiCompatible { endpoint, .. } = provider {
+                validate_endpoint(endpoint)?;
+            }
             if let ProviderConfig::Command { program, .. } = provider
                 && program.trim().is_empty()
             {
@@ -401,6 +405,26 @@ mod tests {
             .get_mut("test")
             .expect("test profile")
             .primary = "local".to_owned();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_remote_plain_http_provider_endpoint() {
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        config.providers.insert(
+            "cloud".to_owned(),
+            ProviderConfig::OpenaiCompatible {
+                endpoint: "http://example.com/v1/audio/transcriptions".to_owned(),
+                model: "test".to_owned(),
+                secret: "test".to_owned(),
+                timeout_seconds: 30,
+            },
+        );
+        config
+            .profiles
+            .get_mut("test")
+            .expect("test profile")
+            .primary = "cloud".to_owned();
         assert!(config.validate().is_err());
     }
 }
