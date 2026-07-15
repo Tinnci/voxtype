@@ -11,13 +11,22 @@ ExecStart=%h/.local/bin/voxtype-tray
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes
+CapabilityBoundingSet=
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
+UMask=0077
 
 [Install]
 WantedBy=graphical-session.target

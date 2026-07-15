@@ -55,6 +55,13 @@ bool isSecure(InputContext *context) {
         CapabilityFlags{CapabilityFlag::Password, CapabilityFlag::Sensitive});
 }
 
+std::string response(std::string_view status, std::string_view detail) {
+    std::string value(status);
+    value.push_back('\0');
+    value.append(detail);
+    return value;
+}
+
 } // namespace
 
 class VoxTypeBridge final : public AddonInstance {
@@ -140,7 +147,7 @@ private:
         const auto command = field(message, 0);
         std::string response;
         if (command == "PING") {
-            response = std::string{"OK\0ready", 8};
+            response = fcitx::response("OK", "ready");
         } else if (command == "ARM") {
             response = arm(field(message, 1));
         } else if (command == "COMMIT") {
@@ -148,7 +155,7 @@ private:
         } else if (command == "CANCEL") {
             response = cancel(field(message, 1));
         } else {
-            response = "ERR\0unknown-command";
+            response = fcitx::response("ERR", "unknown-command");
         }
         sendto(socketFd_, response.data(), response.size(), 0,
                reinterpret_cast<sockaddr *>(&sender), senderLength);
@@ -157,10 +164,10 @@ private:
     std::string arm(std::string_view session) {
         auto *context = instance_->lastFocusedInputContext();
         if (!context || !context->hasFocus()) {
-            return "ERR\0no-focused-context";
+            return response("ERR", "no-focused-context");
         }
         if (isSecure(context)) {
-            return "ERR\0secure-context";
+            return response("ERR", "secure-context");
         }
         armedContext_ = context->watch();
         armedSession_ = session;
@@ -174,19 +181,19 @@ private:
     std::string commit(std::string_view session, std::string_view text) {
         auto *context = armedContext_.get();
         if (session != armedSession_) {
-            return "ERR\0session-mismatch";
+            return response("ERR", "session-mismatch");
         }
         if (!context || !context->hasFocus() ||
             context != instance_->lastFocusedInputContext()) {
             clear();
-            return "ERR\0focus-changed";
+            return response("ERR", "focus-changed");
         }
         if (isSecure(context)) {
             clear();
-            return "ERR\0secure-context";
+            return response("ERR", "secure-context");
         }
         if (text.empty()) {
-            return "ERR\0empty-text";
+            return response("ERR", "empty-text");
         }
         const std::string pendingText(text);
         pendingCommit_ = instance_->eventLoop().addDeferEvent(
@@ -202,15 +209,15 @@ private:
                 return true;
             });
         pendingCommit_->setOneShot();
-        return "OK\0queued";
+        return response("OK", "queued");
     }
 
     std::string cancel(std::string_view session) {
         if (!armedSession_.empty() && session != armedSession_) {
-            return "ERR\0session-mismatch";
+            return response("ERR", "session-mismatch");
         }
         clear();
-        return "OK\0cancelled";
+        return response("OK", "cancelled");
     }
 
     void clear() {
