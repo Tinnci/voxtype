@@ -27,6 +27,15 @@ impl<'a> Client<'a> {
         self.proxy.call("Status", &())
     }
 
+    /// Returns provider availability and consecutive failure counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error when the daemon does not answer.
+    pub fn provider_status(&self) -> zbus::Result<String> {
+        self.proxy.call("ProviderStatus", &())
+    }
+
     /// Starts recording and returns the new session ID.
     ///
     /// # Errors

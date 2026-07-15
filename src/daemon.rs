@@ -73,6 +73,22 @@ impl VoxTypeDaemon {
             .map_or_else(String::new, ToString::to_string)
     }
 
+    /// Returns a compact snapshot of configured provider health.
+    fn provider_status(&self) -> String {
+        let now = Instant::now();
+        self.config
+            .providers
+            .keys()
+            .map(|id| {
+                let state = self.provider_health.get(id);
+                let available = state.is_none_or(|health| health.is_available_at(now));
+                let failures = state.map_or(0, |health| health.consecutive_failures);
+                format!("{id}:available={available},failures={failures}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn start(&mut self, profile: &str) -> fdo::Result<String> {
         if self.recording.is_some() {
             return Err(fdo::Error::Failed("recording is already active".to_owned()));
