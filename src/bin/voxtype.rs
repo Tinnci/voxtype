@@ -39,6 +39,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     match command.as_str() {
         "status" => println!("{}", client.status()?),
         "providers" => println!("{}", client.provider_status()?),
+        "fcitx-focus" => {
+            if client.status()? != "idle" {
+                return Err("fcitx focus probing requires an idle daemon".into());
+            }
+            let target = FcitxBridge.probe()?;
+            println!("program={} frontend={}", target.program, target.frontend);
+        }
         "start" => println!(
             "{}",
             client.start(arguments.next().as_deref().unwrap_or(""))?
@@ -65,7 +72,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
+        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype fcitx-focus\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
     );
 }
 

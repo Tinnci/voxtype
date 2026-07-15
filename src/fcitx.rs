@@ -13,6 +13,12 @@ static CLIENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FcitxBridge;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FcitxTarget {
+    pub program: String,
+    pub frontend: String,
+}
+
 impl FcitxBridge {
     /// Verifies that the Fcitx addon is available.
     ///
@@ -31,8 +37,29 @@ impl FcitxBridge {
     /// Returns an error if there is no focused context, the context is secure,
     /// or the addon is unavailable.
     pub fn arm(self, session: &SessionId) -> Result<(), VoxError> {
+        self.arm_target(session).map(|_| ())
+    }
+
+    /// Arms the focused context and returns its application/frontend identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same focus, security, and transport errors as [`Self::arm`].
+    pub fn arm_target(self, session: &SessionId) -> Result<FcitxTarget, VoxError> {
         let response = request(&[b"ARM", session.as_str().as_bytes()])?;
-        expect_ok(&response)
+        parse_arm_response(&response)
+    }
+
+    /// Probes the focused context without committing text.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no safe Fcitx context currently has focus.
+    pub fn probe(self) -> Result<FcitxTarget, VoxError> {
+        let session = SessionId::from_counter(u64::MAX);
+        let target = self.arm_target(&session)?;
+        self.cancel(&session);
+        Ok(target)
     }
 
     /// Commits text only when the context armed for this session still has focus.
@@ -49,6 +76,37 @@ impl FcitxBridge {
     /// Clears any armed input context for the session.
     pub fn cancel(self, session: &SessionId) {
         let _result = request(&[b"CANCEL", session.as_str().as_bytes()]);
+    }
+}
+
+fn parse_arm_response(response: &[u8]) -> Result<FcitxTarget, VoxError> {
+    expect_ok(response)?;
+    let mut fields = response.split(|byte| *byte == 0);
+    let _status = fields.next();
+    let _action = fields.next();
+    let program = parse_identity_field(fields.next())?;
+    let frontend = parse_identity_field(fields.next())?;
+    Ok(FcitxTarget { program, frontend })
+}
+
+fn parse_identity_field(field: Option<&[u8]>) -> Result<String, VoxError> {
+    match field {
+        Some(value) => std::str::from_utf8(value)
+            .map(|value| {
+                if value.is_empty() {
+                    "unknown".to_owned()
+                } else {
+                    value.to_owned()
+                }
+            })
+            .map_err(|_| {
+                VoxError::new(
+                    ErrorCategory::Protocol,
+                    "fcitx.invalid_response",
+                    "Fcitx bridge response contains invalid UTF-8",
+                )
+            }),
+        None => Ok("unknown".to_owned()),
     }
 }
 
@@ -150,5 +208,19 @@ mod tests {
     #[test]
     fn accepts_ok_response() {
         expect_ok(b"OK\0armed").expect("OK response");
+    }
+
+    #[test]
+    fn parses_armed_target() {
+        let target = parse_arm_response(b"OK\0armed\0kate\0wayland").expect("target response");
+        assert_eq!(target.program, "kate");
+        assert_eq!(target.frontend, "wayland");
+    }
+
+    #[test]
+    fn normalizes_empty_target_identity() {
+        let target = parse_arm_response(b"OK\0armed\0\0wayland").expect("target response");
+        assert_eq!(target.program, "unknown");
+        assert_eq!(target.frontend, "wayland");
     }
 }
