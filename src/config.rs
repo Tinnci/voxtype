@@ -128,6 +128,13 @@ pub enum ProviderConfig {
         #[serde(default = "default_timeout")]
         timeout_seconds: u64,
     },
+    Command {
+        program: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default = "default_timeout")]
+        timeout_seconds: u64,
+    },
 }
 
 impl Config {
@@ -192,14 +199,24 @@ impl Config {
             }
         }
         for provider in self.providers.values() {
-            if let ProviderConfig::OpenaiCompatible {
-                timeout_seconds, ..
-            } = provider
-                && !(1..=300).contains(timeout_seconds)
-            {
+            let timeout_seconds = match provider {
+                ProviderConfig::OpenaiCompatible {
+                    timeout_seconds, ..
+                }
+                | ProviderConfig::Command {
+                    timeout_seconds, ..
+                } => timeout_seconds,
+                ProviderConfig::Mock { .. } => continue,
+            };
+            if !(1..=300).contains(timeout_seconds) {
                 return Err(configuration(
                     "provider timeout must be between 1 and 300 seconds",
                 ));
+            }
+            if let ProviderConfig::Command { program, .. } = provider
+                && program.trim().is_empty()
+            {
+                return Err(configuration("command provider program is empty"));
             }
         }
         Ok(())

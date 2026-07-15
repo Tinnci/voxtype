@@ -33,6 +33,26 @@ text = "VoxType 本地集成测试"
 
 Do not mistake a successful mock run for ASR quality verification.
 
+## Local command providers
+
+For a local model or an existing wrapper, use a command provider. VoxType starts
+the program without a shell and exposes the captured WAV and language through
+environment variables. The command must print only the transcript to stdout.
+
+```toml
+[providers.local-whisper]
+kind = "command"
+program = "/usr/local/bin/voxtype-whisper-wrapper"
+args = ["--audio", "${VOXTYPE_AUDIO_PATH}"]
+timeout_seconds = 120
+```
+
+The wrapper receives `VOXTYPE_AUDIO_PATH` and `VOXTYPE_LANGUAGE`; arguments are
+not interpolated by VoxType, so the example wrapper should read the environment
+variable directly rather than relying on `${...}` expansion. The command is terminated
+when the configured timeout expires, and non-zero or empty output is treated as
+a provider failure.
+
 ## OpenAI-compatible providers
 
 Any service implementing the common multipart transcription shape can be an

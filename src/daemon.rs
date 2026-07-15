@@ -466,9 +466,97 @@ impl VoxTypeDaemon {
                 )
                 .map(|result| result.text)
             }
+            ProviderConfig::Command {
+                program,
+                args,
+                timeout_seconds,
+            } => transcribe_command(program, args, *timeout_seconds, pcm_path, language),
         }
     }
+}
 
+fn transcribe_command(
+    program: &str,
+    args: &[String],
+    timeout_seconds: u64,
+    pcm_path: &Path,
+    language: &str,
+) -> Result<String, VoxError> {
+    let mut child = ProcessCommand::new(program)
+        .args(args)
+        .env("VOXTYPE_AUDIO_PATH", pcm_path)
+        .env("VOXTYPE_LANGUAGE", language)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            VoxError::new(
+                ErrorCategory::Unavailable,
+                "provider.command_failed",
+                error.to_string(),
+            )
+            .with_retryable(true)
+        })?;
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| {
+                VoxError::new(
+                    ErrorCategory::Unavailable,
+                    "provider.command_wait",
+                    error.to_string(),
+                )
+            })?
+            .is_some()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(VoxError::new(
+                ErrorCategory::RateLimited,
+                "provider.command_timeout",
+                "command provider timed out",
+            )
+            .with_retryable(true));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().map_err(|error| {
+        VoxError::new(
+            ErrorCategory::Unavailable,
+            "provider.command_output",
+            error.to_string(),
+        )
+    })?;
+    if !output.status.success() {
+        return Err(VoxError::new(
+            ErrorCategory::Unavailable,
+            "provider.command_exit",
+            format!("command exited with {}", output.status),
+        )
+        .with_retryable(true));
+    }
+    let text = String::from_utf8(output.stdout).map_err(|error| {
+        VoxError::new(
+            ErrorCategory::Protocol,
+            "provider.command_output",
+            error.to_string(),
+        )
+    })?;
+    let text = text.trim().to_owned();
+    if text.is_empty() {
+        return Err(VoxError::new(
+            ErrorCategory::Protocol,
+            "provider.command_empty",
+            "command provider returned empty output",
+        ));
+    }
+    Ok(text)
+}
+
+impl VoxTypeDaemon {
     fn insert_text(&self, session: &SessionId, text: &str) -> Result<CompletedInsertion, VoxError> {
         match self.armed_insertion {
             Some(ArmedInsertion::Fcitx) => {
@@ -528,5 +616,13 @@ mod tests {
         health.record_retryable_failure_at(now);
         assert!(!health.is_available_at(now + Duration::from_secs(59)));
         assert!(health.is_available_at(now + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn command_provider_returns_stdout() {
+        let args = vec!["-c".to_owned(), "printf '本地文本'".to_owned()];
+        let text = transcribe_command("/bin/sh", &args, 1, Path::new("/tmp/audio.wav"), "zh")
+            .expect("command provider output");
+        assert_eq!(text, "本地文本");
     }
 }
