@@ -243,4 +243,8 @@ public:
 
 } // namespace fcitx
 
+#ifdef FCITX_ADDON_FACTORY_V2
 FCITX_ADDON_FACTORY_V2(voxtypebridge, fcitx::VoxTypeBridgeFactory);
+#else
+FCITX_ADDON_FACTORY(fcitx::VoxTypeBridgeFactory);
+#endif
