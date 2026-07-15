@@ -43,13 +43,14 @@ environment variables. The command must print only the transcript to stdout.
 [providers.local-whisper]
 kind = "command"
 program = "/usr/local/bin/voxtype-whisper-wrapper"
-args = ["--audio", "${VOXTYPE_AUDIO_PATH}"]
+args = ["--read-environment"]
 timeout_seconds = 120
 ```
 
 The wrapper receives `VOXTYPE_AUDIO_PATH` and `VOXTYPE_LANGUAGE`; arguments are
 not interpolated by VoxType, so the example wrapper should read the environment
-variable directly rather than relying on `${...}` expansion. The command is terminated
+variable directly rather than relying on `${...}` expansion. The command path must
+be absolute and is terminated
 when the configured timeout expires, and non-zero or empty output is treated as
 a provider failure.
 

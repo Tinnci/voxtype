@@ -218,6 +218,13 @@ impl Config {
             {
                 return Err(configuration("command provider program is empty"));
             }
+            if let ProviderConfig::Command { program, .. } = provider
+                && !std::path::Path::new(program).is_absolute()
+            {
+                return Err(configuration(
+                    "command provider program must be an absolute path",
+                ));
+            }
         }
         Ok(())
     }
@@ -375,6 +382,25 @@ mod tests {
             .get_mut("test")
             .expect("test profile")
             .primary = "missing".to_owned();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_relative_command_provider_program() {
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        config.providers.insert(
+            "local".to_owned(),
+            ProviderConfig::Command {
+                program: "whisper-wrapper".to_owned(),
+                args: Vec::new(),
+                timeout_seconds: 30,
+            },
+        );
+        config
+            .profiles
+            .get_mut("test")
+            .expect("test profile")
+            .primary = "local".to_owned();
         assert!(config.validate().is_err());
     }
 }
