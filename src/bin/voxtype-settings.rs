@@ -12,11 +12,12 @@ use std::time::Duration;
 use voxtype::audio::Recording;
 use voxtype::client::Client;
 use voxtype::config::{
-    Config, InsertionBackend, ProviderConfig, ProviderQuotaConfig, config_path, secret_state,
-    store_secret,
+    Config, InsertionBackend, ProfileConfig, ProviderConfig, ProviderQuotaConfig, ReplaySetting,
+    config_path, secret_state, store_secret,
 };
 use voxtype::qml;
 use voxtype::vad::{self, VadConfig};
+use voxtype_core::ProviderId;
 use zbus::blocking::Connection;
 
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
@@ -161,6 +162,7 @@ fn route(request: &Request<'_>) -> io::Result<Response> {
         ("GET", "/state") => settings_state().map(|value| Response::json(&value)),
         ("POST", "/general") => save_general(request.body),
         ("POST", "/calibrate") => calibrate_microphone(),
+        ("POST", "/provider") => create_provider(request.body),
         ("POST", "/open-config") => open_config(),
         ("POST", path) if path.starts_with("/provider/") => {
             save_provider(&percent_decode(&path[10..])?, request.body)
@@ -189,20 +191,33 @@ fn calibrate_microphone() -> io::Result<Response> {
     );
     let _ = fs::remove_file(&recording.path);
     let result = result?;
+    let level_status = microphone_level_status(result.peak);
     Ok(Response::json(&json!({
         "noise_floor": result.noise_floor,
         "average_rms": result.average_rms,
         "peak": result.peak,
         "adaptive_threshold": result.adaptive_threshold,
         "suggested_threshold": result.noise_floor.saturating_mul(2).saturating_add(80),
+        "level_status": level_status,
         "speech_ratio": if result.total_frames == 0 { 0.0 } else {
             f64::from(result.voiced_frames) / f64::from(result.total_frames)
         },
     })))
 }
 
+const fn microphone_level_status(peak: u16) -> &'static str {
+    if peak >= 32_000 {
+        "clipping"
+    } else if peak < 500 {
+        "too-quiet"
+    } else {
+        "ok"
+    }
+}
+
 fn settings_state() -> io::Result<Value> {
     let config = Config::load_or_create().map_err(domain_io)?;
+    let onboarding_needed = needs_provider_onboarding(&config);
     let usage = Connection::session()
         .and_then(|connection| {
             let client = Client::connect(&connection)?;
@@ -285,6 +300,7 @@ fn settings_state() -> io::Result<Value> {
     Ok(json!({
         "config_path": config_path().map_err(domain_io)?,
         "usage_scope": usage.get("scope").and_then(Value::as_str).unwrap_or("unavailable"),
+        "onboarding_needed": onboarding_needed,
         "general": {
             "default_profile": config.default_profile,
             "profiles": config.profiles.keys().collect::<Vec<_>>(),
@@ -300,6 +316,78 @@ fn settings_state() -> io::Result<Value> {
         },
         "providers": providers,
     }))
+}
+
+fn needs_provider_onboarding(config: &Config) -> bool {
+    config
+        .providers
+        .values()
+        .all(|provider| matches!(provider, ProviderConfig::Mock { .. }))
+}
+
+#[derive(Deserialize)]
+struct CreateProviderUpdate {
+    id: String,
+    kind: String,
+    endpoint: String,
+    model: String,
+    language: String,
+    make_default: bool,
+}
+
+fn create_provider(body: &[u8]) -> io::Result<Response> {
+    let update: CreateProviderUpdate = serde_json::from_slice(body).map_err(invalid_input)?;
+    let mut config = Config::load_or_create().map_err(domain_io)?;
+    if let Err(message) = apply_provider_create(&mut config, &update) {
+        return Ok(Response::error(400, &message));
+    }
+    persist_and_reload(&config)
+}
+
+fn apply_provider_create(config: &mut Config, update: &CreateProviderUpdate) -> Result<(), String> {
+    let id = ProviderId::new(update.id.trim())
+        .map_err(|error| error.message().to_owned())?
+        .to_string();
+    let language = update.language.trim();
+    if language.is_empty() || language.len() > 32 || language.chars().any(char::is_control) {
+        return Err("language must contain 1 to 32 characters".to_owned());
+    }
+    if config.providers.contains_key(&id) || config.profiles.contains_key(&id) {
+        return Err("provider or profile ID already exists".to_owned());
+    }
+    let secret = format!("{id}-api-key");
+    let provider = match update.kind.as_str() {
+        "openai-compatible" => ProviderConfig::OpenaiCompatible {
+            endpoint: update.endpoint.trim().to_owned(),
+            model: update.model.trim().to_owned(),
+            secret,
+            timeout_seconds: 30,
+        },
+        "deepgram" => ProviderConfig::Deepgram {
+            endpoint: update.endpoint.trim().to_owned(),
+            model: update.model.trim().to_owned(),
+            secret,
+            timeout_seconds: 30,
+            smart_format: true,
+        },
+        _ => return Err("unsupported provider kind".to_owned()),
+    };
+    config.providers.insert(id.clone(), provider);
+    config.profiles.insert(
+        id.clone(),
+        ProfileConfig {
+            primary: id.clone(),
+            fallbacks: Vec::new(),
+            language: language.to_owned(),
+            replay: ReplaySetting::Never,
+        },
+    );
+    if update.make_default {
+        config.default_profile = id;
+    }
+    config
+        .validate()
+        .map_err(|error| error.message().to_owned())
 }
 
 fn empty_usage() -> Value {
@@ -668,5 +756,44 @@ mod tests {
     #[test]
     fn escapes_json_pointer_segments() {
         assert_eq!(json_pointer_escape("a/b~c"), "a~1b~0c");
+    }
+
+    #[test]
+    fn creates_a_real_provider_and_profile() {
+        let mut config: Config = toml::from_str(
+            r#"schema_version = 1
+default_profile = "demo"
+[desktop]
+[audio]
+[profiles.demo]
+primary = "demo"
+[providers.demo]
+kind = "mock"
+text = "demo"
+"#,
+        )
+        .expect("fixture config");
+        let update = CreateProviderUpdate {
+            id: "work-asr".to_owned(),
+            kind: "deepgram".to_owned(),
+            endpoint: "https://api.deepgram.com/v1/listen".to_owned(),
+            model: "nova-3".to_owned(),
+            language: "zh".to_owned(),
+            make_default: true,
+        };
+        apply_provider_create(&mut config, &update).expect("provider creation");
+        assert_eq!(config.default_profile, "work-asr");
+        assert_eq!(config.profiles["work-asr"].primary, "work-asr");
+        assert!(matches!(
+            config.providers["work-asr"],
+            ProviderConfig::Deepgram { .. }
+        ));
+    }
+
+    #[test]
+    fn classifies_microphone_peak_levels() {
+        assert_eq!(microphone_level_status(100), "too-quiet");
+        assert_eq!(microphone_level_status(2_000), "ok");
+        assert_eq!(microphone_level_status(32_000), "clipping");
     }
 }

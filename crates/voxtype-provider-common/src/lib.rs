@@ -1,10 +1,23 @@
 //! Small audited helpers shared by cloud provider protocol adapters.
 
+use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
 use voxtype_core::{ErrorCategory, VoxError};
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// Maximum provider response retained in memory.
+///
+/// ASR transcript JSON is normally only a few kilobytes. A one MiB ceiling
+/// leaves ample room for metadata while preventing a broken endpoint from
+/// growing the daemon without bound.
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_STDERR_BYTES: usize = 16 * 1024;
+const HTTP_STATUS_MARKER: &str = "VOXTYPE_HTTP_STATUS:";
+const CURL_WRITE_OUT: &str = "%{stderr}\nVOXTYPE_HTTP_STATUS:%{http_code}\n";
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretString(String);
@@ -52,6 +65,404 @@ pub fn validate_secret_bytes(value: &[u8]) -> Result<(), VoxError> {
 impl std::fmt::Debug for SecretString {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("SecretString([redacted])")
+    }
+}
+
+/// Successful output from one non-redirecting curl request.
+pub struct CurlResponse {
+    pub http_status: u16,
+    pub body: Vec<u8>,
+}
+
+/// A normalized curl or HTTP failure that can be mapped to a provider-specific
+/// stable error code without losing routing semantics.
+#[derive(Debug)]
+pub struct CurlFailure {
+    category: ErrorCategory,
+    retryable: bool,
+    message: String,
+    http_status: Option<u16>,
+    curl_exit_code: Option<i32>,
+}
+
+impl CurlFailure {
+    #[must_use]
+    pub const fn category(&self) -> ErrorCategory {
+        self.category
+    }
+
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+
+    #[must_use]
+    pub const fn http_status(&self) -> Option<u16> {
+        self.http_status
+    }
+
+    #[must_use]
+    pub const fn curl_exit_code(&self) -> Option<i32> {
+        self.curl_exit_code
+    }
+
+    /// Converts the transport failure into the application's stable error
+    /// representation while preserving category and retryability.
+    #[must_use]
+    pub fn into_vox_error(self, code: &'static str) -> VoxError {
+        VoxError::new(self.category, code, self.message).with_retryable(self.retryable)
+    }
+}
+
+/// Executes one bounded HTTP request with the system curl binary.
+///
+/// Common security and failure behavior is enforced here:
+///
+/// - user curl configuration is disabled;
+/// - only HTTP(S) schemes are permitted at the transport layer;
+/// - redirects are not followed;
+/// - the authorization configuration is written through private stdin;
+/// - response and diagnostic memory are bounded;
+/// - HTTP status and curl exit status are classified independently.
+///
+/// Provider adapters supply only protocol-specific arguments such as headers,
+/// multipart fields, request bodies, and the final `--url` value.
+///
+/// # Errors
+///
+/// Returns a normalized failure for process startup, timeout, connection,
+/// oversized response, non-success HTTP status, or local pipe errors.
+pub fn execute_curl<I, S>(
+    args: I,
+    timeout_seconds: u64,
+    private_config: &[u8],
+    max_response_bytes: usize,
+) -> Result<CurlResponse, CurlFailure>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let max_response_bytes = max_response_bytes.max(1);
+    let mut command = curl_command(timeout_seconds, max_response_bytes);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command.spawn().map_err(|error| {
+        failure(
+            ErrorCategory::Unavailable,
+            true,
+            format!("could not start curl: {error}"),
+            None,
+            None,
+        )
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        failure(
+            ErrorCategory::Internal,
+            false,
+            "curl stdout is unavailable".to_owned(),
+            None,
+            None,
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        failure(
+            ErrorCategory::Internal,
+            false,
+            "curl stderr is unavailable".to_owned(),
+            None,
+            None,
+        )
+    })?;
+    let stdout_reader = thread::spawn(move || read_bounded(stdout, max_response_bytes));
+    let stderr_reader = thread::spawn(move || read_bounded(stderr, MAX_STDERR_BYTES));
+
+    let stdin_error = child.stdin.take().map_or_else(
+        || Some(io::Error::other("curl stdin is unavailable")),
+        |mut stdin| stdin.write_all(private_config).err(),
+    );
+    let status = child.wait().map_err(|error| {
+        failure(
+            ErrorCategory::Unavailable,
+            true,
+            format!("could not wait for curl: {error}"),
+            None,
+            None,
+        )
+    })?;
+    let body = join_reader(stdout_reader, "stdout")?;
+    let diagnostics = join_reader(stderr_reader, "stderr")?;
+    let http_status = parse_http_status(&diagnostics.bytes);
+    let curl_exit_code = status.code();
+    let diagnostic = sanitized_diagnostic(&diagnostics.bytes);
+
+    if body.overflowed {
+        return Err(failure(
+            ErrorCategory::Protocol,
+            false,
+            format!("provider response exceeded {max_response_bytes} bytes"),
+            http_status,
+            curl_exit_code,
+        ));
+    }
+
+    if let Some(error) = stdin_error {
+        return Err(failure(
+            ErrorCategory::Connection,
+            true,
+            format!("could not provide curl request credentials: {error}"),
+            http_status,
+            curl_exit_code,
+        ));
+    }
+
+    if !status.success() {
+        return Err(classify_curl_failure(
+            curl_exit_code,
+            http_status,
+            diagnostic.as_deref(),
+            max_response_bytes,
+        ));
+    }
+
+    let Some(http_status) = http_status else {
+        return Err(failure(
+            ErrorCategory::Protocol,
+            false,
+            "curl completed without an HTTP status".to_owned(),
+            None,
+            curl_exit_code,
+        ));
+    };
+    if !(200..300).contains(&http_status) {
+        return Err(classify_http_failure(
+            http_status,
+            curl_exit_code,
+            diagnostic.as_deref(),
+        ));
+    }
+
+    Ok(CurlResponse {
+        http_status,
+        body: body.bytes,
+    })
+}
+
+fn curl_command(timeout_seconds: u64, max_response_bytes: usize) -> Command {
+    let mut command = Command::new("curl");
+    command
+        // --disable must be the first curl argument to suppress ~/.curlrc.
+        .arg("--disable")
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail-with-body",
+            "--proto",
+            "=http,https",
+            "--max-redirs",
+            "0",
+            "--max-time",
+            &timeout_seconds.to_string(),
+            "--max-filesize",
+            &max_response_bytes.to_string(),
+            "--write-out",
+            CURL_WRITE_OUT,
+            "--config",
+            "-",
+        ]);
+    command
+}
+
+#[derive(Debug)]
+struct BoundedRead {
+    bytes: Vec<u8>,
+    overflowed: bool,
+}
+
+fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
+    let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
+    let mut overflowed = false;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(bytes.len());
+        let retained = remaining.min(count);
+        bytes.extend_from_slice(&buffer[..retained]);
+        overflowed |= retained < count;
+    }
+    Ok(BoundedRead { bytes, overflowed })
+}
+
+fn join_reader(
+    reader: thread::JoinHandle<io::Result<BoundedRead>>,
+    stream: &'static str,
+) -> Result<BoundedRead, CurlFailure> {
+    reader
+        .join()
+        .map_err(|_| {
+            failure(
+                ErrorCategory::Internal,
+                false,
+                format!("curl {stream} reader panicked"),
+                None,
+                None,
+            )
+        })?
+        .map_err(|error| {
+            failure(
+                ErrorCategory::Internal,
+                false,
+                format!("could not read curl {stream}: {error}"),
+                None,
+                None,
+            )
+        })
+}
+
+fn parse_http_status(stderr: &[u8]) -> Option<u16> {
+    let diagnostics = String::from_utf8_lossy(stderr);
+    diagnostics.lines().rev().find_map(|line| {
+        line.trim()
+            .strip_prefix(HTTP_STATUS_MARKER)
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|status| *status != 0)
+    })
+}
+
+fn sanitized_diagnostic(stderr: &[u8]) -> Option<String> {
+    let diagnostics = String::from_utf8_lossy(stderr);
+    diagnostics
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with(HTTP_STATUS_MARKER))
+        .map(|line| line.chars().take(300).collect())
+}
+
+fn classify_curl_failure(
+    curl_exit_code: Option<i32>,
+    http_status: Option<u16>,
+    diagnostic: Option<&str>,
+    max_response_bytes: usize,
+) -> CurlFailure {
+    match curl_exit_code {
+        Some(22) if http_status.is_some() => classify_http_failure(
+            http_status.expect("status checked above"),
+            curl_exit_code,
+            diagnostic,
+        ),
+        Some(28) => failure(
+            ErrorCategory::Timeout,
+            true,
+            diagnostic
+                .unwrap_or("provider request timed out")
+                .to_owned(),
+            http_status,
+            curl_exit_code,
+        ),
+        Some(63) => failure(
+            ErrorCategory::Protocol,
+            false,
+            format!("provider response exceeded {max_response_bytes} bytes"),
+            http_status,
+            curl_exit_code,
+        ),
+        Some(5 | 6 | 7 | 35 | 52 | 55 | 56) => failure(
+            ErrorCategory::Connection,
+            true,
+            diagnostic
+                .unwrap_or("provider connection failed")
+                .to_owned(),
+            http_status,
+            curl_exit_code,
+        ),
+        Some(60) => failure(
+            ErrorCategory::Connection,
+            false,
+            diagnostic
+                .unwrap_or("provider TLS certificate validation failed")
+                .to_owned(),
+            http_status,
+            curl_exit_code,
+        ),
+        _ if http_status.is_some_and(|status| !(200..300).contains(&status)) => {
+            classify_http_failure(
+                http_status.expect("status checked above"),
+                curl_exit_code,
+                diagnostic,
+            )
+        }
+        _ => failure(
+            ErrorCategory::Unavailable,
+            true,
+            diagnostic.unwrap_or("provider transport failed").to_owned(),
+            http_status,
+            curl_exit_code,
+        ),
+    }
+}
+
+fn classify_http_failure(
+    http_status: u16,
+    curl_exit_code: Option<i32>,
+    diagnostic: Option<&str>,
+) -> CurlFailure {
+    let (category, retryable, default_message) = match http_status {
+        401 | 403 | 407 => (
+            ErrorCategory::Authentication,
+            false,
+            "provider rejected authentication",
+        ),
+        408 => (ErrorCategory::Timeout, true, "provider request timed out"),
+        429 => (
+            ErrorCategory::RateLimited,
+            true,
+            "provider rate limit was reached",
+        ),
+        500..=599 => (
+            ErrorCategory::Unavailable,
+            true,
+            "provider service is unavailable",
+        ),
+        300..=399 => (
+            ErrorCategory::Protocol,
+            false,
+            "provider returned a redirect; redirects are disabled",
+        ),
+        _ => (
+            ErrorCategory::Protocol,
+            false,
+            "provider rejected the request",
+        ),
+    };
+    let detail = diagnostic.unwrap_or(default_message);
+    failure(
+        category,
+        retryable,
+        format!("HTTP {http_status}: {detail}"),
+        Some(http_status),
+        curl_exit_code,
+    )
+}
+
+fn failure(
+    category: ErrorCategory,
+    retryable: bool,
+    message: String,
+    http_status: Option<u16>,
+    curl_exit_code: Option<i32>,
+) -> CurlFailure {
+    CurlFailure {
+        category,
+        retryable,
+        message,
+        http_status,
+        curl_exit_code,
     }
 }
 

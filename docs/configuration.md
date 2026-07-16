@@ -35,11 +35,13 @@ application does not expose a usable input-method context.
 
 ## Voice activity detection and trimming
 
-The local VAD analyzes 20 ms PCM frames without an external DSP library. The
-configured RMS threshold is an absolute lower bound; VoxType also estimates the
-room noise floor from a low percentile and raises the effective threshold when
-needed. Consecutive loud frames enter the speech state, while a release window
-prevents short pauses from ending an utterance.
+The local VAD analyzes 20 ms PCM frames without an external DSP library. Its
+stateful core tracks noise only outside confirmed speech, uses separate entry
+and exit thresholds, and emits attack/release/hangover boundary events. Batch
+recordings seed that detector from a low percentile; live capture can feed the
+same state frame by frame. The configured RMS threshold remains an absolute
+lower bound, and a release plus hangover window prevents short pauses from
+ending an utterance.
 
 When speech is found, cloud and command providers receive a trimmed recording
 with 160 ms of pre-roll and 300 ms of post-roll. This preserves fast consonant
@@ -68,6 +70,11 @@ text = "VoxType 本地集成测试"
 ```
 
 Do not mistake a successful mock run for ASR quality verification.
+The settings panel labels this provider as a fixed-text demo and shows a
+first-run warning while no real provider exists. It can create an
+OpenAI-compatible or Deepgram provider together with a same-named profile;
+credentials are then stored separately through Secret Service/KWallet. Mock
+invocations do not increment request/audio quota counters.
 
 ## Local command providers
 

@@ -5,7 +5,85 @@ use voxtype::audio::Recording;
 use voxtype::client::Client;
 use voxtype::config::{Config, ProviderConfig, config_path, store_secret};
 use voxtype::fcitx::FcitxBridge;
-use zbus::blocking::Connection;
+use zbus::blocking::{Connection, Proxy};
+use zbus::zvariant::OwnedObjectPath;
+
+const KGLOBALACCEL_NAME: &str = "org.kde.kglobalaccel";
+const KGLOBALACCEL_PATH: &str = "/kglobalaccel";
+const KGLOBALACCEL_INTERFACE: &str = "org.kde.KGlobalAccel";
+const KGLOBALACCEL_COMPONENT_INTERFACE: &str = "org.kde.kglobalaccel.Component";
+
+type KGlobalShortcutInfo = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Vec<i32>,
+    Vec<i32>,
+);
+
+#[derive(Clone, Copy)]
+struct ExpectedShortcut {
+    label: &'static str,
+    component_path: &'static str,
+    component_id: &'static str,
+    action_id: &'static str,
+}
+
+const EXPECTED_SHORTCUTS: [ExpectedShortcut; 3] = [
+    ExpectedShortcut {
+        label: "toggle",
+        component_path: "/component/io_github_tinnci_VoxType_desktop",
+        component_id: "io.github.tinnci.VoxType.desktop",
+        action_id: "_launch",
+    },
+    ExpectedShortcut {
+        label: "cancel",
+        component_path: "/component/io_github_tinnci_VoxType_desktop",
+        component_id: "io.github.tinnci.VoxType.desktop",
+        action_id: "Cancel",
+    },
+    ExpectedShortcut {
+        label: "grammar",
+        component_path: "/component/io_github_tinnci_VoxType_Grammar_desktop",
+        component_id: "io.github.tinnci.VoxType.Grammar.desktop",
+        action_id: "_launch",
+    },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShortcutState {
+    Ok,
+    MissingComponent,
+    MissingAction,
+    Inactive,
+    Unbound,
+    Conflict,
+}
+
+impl ShortcutState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::MissingComponent => "missing-component",
+            Self::MissingAction => "missing-action",
+            Self::Inactive => "inactive",
+            Self::Unbound => "unbound",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ShortcutDiagnostic {
+    label: &'static str,
+    state: ShortcutState,
+    current: Vec<i32>,
+    defaults: Vec<i32>,
+    conflicts: Vec<String>,
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -109,7 +187,7 @@ fn doctor_command(section: Option<&str>) -> Result<(), Box<dyn Error>> {
     match section {
         Some("audio") => return doctor_audio(),
         Some("shortcut") => {
-            println!("shortcut.kglobalaccel={}", kglobalaccel_state());
+            print_shortcut_diagnostics();
             return Ok(());
         }
         Some("insertion") => {
@@ -175,7 +253,7 @@ fn doctor_command(section: Option<&str>) -> Result<(), Box<dyn Error>> {
     ] {
         println!("service.{service}={}", user_service_state(service));
     }
-    println!("shortcut.kglobalaccel={}", kglobalaccel_state());
+    print_shortcut_diagnostics();
     for command in [
         "parec",
         "curl",
@@ -225,10 +303,10 @@ fn doctor_provider() -> Result<(), Box<dyn Error>> {
         };
         println!("provider.{id}=configured kind={kind}");
     }
-    if let Ok(connection) = Connection::session()
-        && let Ok(client) = Client::connect(&connection)
-    {
-        println!("provider.health={}", client.provider_status()?);
+    if let Ok(connection) = Connection::session() {
+        if let Ok(client) = Client::connect(&connection) {
+            println!("provider.health={}", client.provider_status()?);
+        }
     }
     Ok(())
 }
@@ -251,49 +329,244 @@ fn doctor_audio() -> Result<(), Box<dyn Error>> {
 }
 
 fn require_idle_daemon(operation: &str) -> Result<(), Box<dyn Error>> {
-    if let Ok(connection) = Connection::session()
-        && let Ok(client) = Client::connect(&connection)
-    {
-        let status = client.status()?;
-        if status != "idle" {
-            return Err(
-                format!("{operation} requires an idle daemon; current state={status}").into(),
-            );
+    if let Ok(connection) = Connection::session() {
+        if let Ok(client) = Client::connect(&connection) {
+            let status = client.status()?;
+            if status != "idle" {
+                return Err(
+                    format!("{operation} requires an idle daemon; current state={status}").into(),
+                );
+            }
         }
     }
     Ok(())
 }
 
-fn kglobalaccel_state() -> &'static str {
-    if kglobalaccel_actions(
-        "/component/io_github_tinnci_VoxType_desktop",
-        &["_launch", "Cancel"],
-    ) && kglobalaccel_actions(
-        "/component/io_github_tinnci_VoxType_Grammar_desktop",
-        &["_launch"],
-    ) {
+fn print_shortcut_diagnostics() {
+    let diagnostics = match kglobalaccel_diagnostics() {
+        Ok(diagnostics) => diagnostics,
+        Err(error) => {
+            println!("shortcut.kglobalaccel=unavailable");
+            println!("shortcut.error={error}");
+            return;
+        }
+    };
+    let overall = if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.state == ShortcutState::Conflict)
+    {
+        "conflict"
+    } else if diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.state == ShortcutState::Ok)
+    {
         "ok"
     } else {
-        "unregistered"
+        "incomplete"
+    };
+    println!("shortcut.kglobalaccel={overall}");
+    for diagnostic in diagnostics {
+        let current = format_shortcuts(&diagnostic.current);
+        let defaults = format_shortcuts(&diagnostic.defaults);
+        if diagnostic.conflicts.is_empty() {
+            println!(
+                "shortcut.{}={} current={} default={}",
+                diagnostic.label,
+                diagnostic.state.as_str(),
+                current,
+                defaults
+            );
+        } else {
+            println!(
+                "shortcut.{}={} current={} default={} conflicts={}",
+                diagnostic.label,
+                diagnostic.state.as_str(),
+                current,
+                defaults,
+                diagnostic.conflicts.join(",")
+            );
+        }
     }
 }
 
-fn kglobalaccel_actions(path: &str, expected: &[&str]) -> bool {
-    let output = std::process::Command::new("qdbus6")
-        .args([
-            "org.kde.kglobalaccel",
-            path,
-            "org.kde.kglobalaccel.Component.shortcutNames",
-        ])
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {
-            let shortcuts = String::from_utf8_lossy(&output.stdout);
-            expected
-                .iter()
-                .all(|name| shortcuts.lines().any(|line| line == *name))
-        }
-        Ok(_) | Err(_) => false,
+fn kglobalaccel_diagnostics() -> zbus::Result<Vec<ShortcutDiagnostic>> {
+    let connection = Connection::session()?;
+    let root = Proxy::new(
+        &connection,
+        KGLOBALACCEL_NAME,
+        KGLOBALACCEL_PATH,
+        KGLOBALACCEL_INTERFACE,
+    )?;
+    let components: Vec<OwnedObjectPath> = root.call("allComponents", &())?;
+    EXPECTED_SHORTCUTS
+        .iter()
+        .map(|expected| diagnose_shortcut(&connection, &root, &components, *expected))
+        .collect()
+}
+
+fn diagnose_shortcut(
+    connection: &Connection,
+    root: &Proxy<'_>,
+    components: &[OwnedObjectPath],
+    expected: ExpectedShortcut,
+) -> zbus::Result<ShortcutDiagnostic> {
+    if !components
+        .iter()
+        .any(|path| path.as_str() == expected.component_path)
+    {
+        return Ok(ShortcutDiagnostic {
+            label: expected.label,
+            state: ShortcutState::MissingComponent,
+            current: Vec::new(),
+            defaults: Vec::new(),
+            conflicts: Vec::new(),
+        });
+    }
+    let component = Proxy::new(
+        connection,
+        KGLOBALACCEL_NAME,
+        expected.component_path,
+        KGLOBALACCEL_COMPONENT_INTERFACE,
+    )?;
+    let active: bool = component.call("isActive", &())?;
+    let infos: Vec<KGlobalShortcutInfo> = component.call("allShortcutInfos", &())?;
+    let Some(info) = infos.iter().find(|info| info.0 == expected.action_id) else {
+        return Ok(ShortcutDiagnostic {
+            label: expected.label,
+            state: ShortcutState::MissingAction,
+            current: Vec::new(),
+            defaults: Vec::new(),
+            conflicts: Vec::new(),
+        });
+    };
+    let current = bound_shortcuts(&info.6);
+    let defaults = bound_shortcuts(&info.7);
+    let inspected = if current.is_empty() {
+        &defaults
+    } else {
+        &current
+    };
+    let mut conflicts = Vec::new();
+    for key in inspected {
+        let owners: Vec<KGlobalShortcutInfo> = root.call("getGlobalShortcutsByKey", key)?;
+        conflicts.extend(other_shortcut_owners(
+            &owners,
+            expected.component_id,
+            expected.action_id,
+            *key,
+        ));
+    }
+    conflicts.sort();
+    conflicts.dedup();
+    let state = classify_shortcut(active, &current, &conflicts);
+    Ok(ShortcutDiagnostic {
+        label: expected.label,
+        state,
+        current,
+        defaults,
+        conflicts,
+    })
+}
+
+fn bound_shortcuts(shortcuts: &[i32]) -> Vec<i32> {
+    shortcuts
+        .iter()
+        .copied()
+        .filter(|shortcut| *shortcut != 0)
+        .collect()
+}
+
+fn classify_shortcut(active: bool, current: &[i32], conflicts: &[String]) -> ShortcutState {
+    if !active {
+        ShortcutState::Inactive
+    } else if !conflicts.is_empty() {
+        ShortcutState::Conflict
+    } else if current.is_empty() {
+        ShortcutState::Unbound
+    } else {
+        ShortcutState::Ok
+    }
+}
+
+fn other_shortcut_owners(
+    owners: &[KGlobalShortcutInfo],
+    component_id: &str,
+    action_id: &str,
+    key: i32,
+) -> Vec<String> {
+    owners
+        .iter()
+        .filter(|owner| owner.2 != component_id || owner.0 != action_id)
+        .map(|owner| format!("{}:{}@{}", owner.2, owner.0, format_qt_shortcut(key)))
+        .collect()
+}
+
+fn format_shortcuts(shortcuts: &[i32]) -> String {
+    if shortcuts.is_empty() {
+        return "none".to_owned();
+    }
+    shortcuts
+        .iter()
+        .map(|shortcut| format_qt_shortcut(*shortcut))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn format_qt_shortcut(shortcut: i32) -> String {
+    const SHIFT: u32 = 0x0200_0000;
+    const CTRL: u32 = 0x0400_0000;
+    const ALT: u32 = 0x0800_0000;
+    const META: u32 = 0x1000_0000;
+    const KEYPAD: u32 = 0x2000_0000;
+    const MODIFIERS: u32 = SHIFT | CTRL | ALT | META | KEYPAD;
+
+    let value = u32::from_ne_bytes(shortcut.to_ne_bytes());
+    let mut parts = Vec::with_capacity(6);
+    if value & META != 0 {
+        parts.push("Meta".to_owned());
+    }
+    if value & CTRL != 0 {
+        parts.push("Ctrl".to_owned());
+    }
+    if value & ALT != 0 {
+        parts.push("Alt".to_owned());
+    }
+    if value & SHIFT != 0 {
+        parts.push("Shift".to_owned());
+    }
+    if value & KEYPAD != 0 {
+        parts.push("Keypad".to_owned());
+    }
+    let key = value & !MODIFIERS;
+    parts.push(format_qt_key(key));
+    parts.join("+")
+}
+
+fn format_qt_key(key: u32) -> String {
+    match key {
+        0x0100_0000 => "Escape".to_owned(),
+        0x0100_0001 => "Tab".to_owned(),
+        0x0100_0002 => "Backtab".to_owned(),
+        0x0100_0003 => "Backspace".to_owned(),
+        0x0100_0004 => "Return".to_owned(),
+        0x0100_0005 => "Enter".to_owned(),
+        0x0100_0006 => "Insert".to_owned(),
+        0x0100_0007 => "Delete".to_owned(),
+        0x0100_0010 => "Home".to_owned(),
+        0x0100_0011 => "End".to_owned(),
+        0x0100_0012 => "Left".to_owned(),
+        0x0100_0013 => "Up".to_owned(),
+        0x0100_0014 => "Right".to_owned(),
+        0x0100_0015 => "Down".to_owned(),
+        0x0100_0016 => "PageUp".to_owned(),
+        0x0100_0017 => "PageDown".to_owned(),
+        0x0100_0030..=0x0100_0052 => format!("F{}", key - 0x0100_0030 + 1),
+        0x20 => "Space".to_owned(),
+        value @ 0x21..=0x7e => char::from_u32(value).map_or_else(
+            || format!("Key(0x{value:08X})"),
+            |character| character.to_string(),
+        ),
+        value => format!("Key(0x{value:08X})"),
     }
 }
 
@@ -354,4 +627,64 @@ fn secret_command(action: &str, name: &str) -> Result<(), Box<dyn Error>> {
     secret.fill(0);
     println!("stored secret reference: {name}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shortcut_info(action: &str, component: &str) -> KGlobalShortcutInfo {
+        (
+            action.to_owned(),
+            String::new(),
+            component.to_owned(),
+            String::new(),
+            "default".to_owned(),
+            "Default Context".to_owned(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn formats_current_plasma_shortcuts() {
+        assert_eq!(format_qt_shortcut(402_653_270), "Meta+Alt+V");
+        assert_eq!(format_qt_shortcut(419_430_400), "Meta+Alt+Escape");
+        assert_eq!(format_qt_shortcut(402_653_255), "Meta+Alt+G");
+    }
+
+    #[test]
+    fn formats_alternative_and_unbound_shortcuts() {
+        assert_eq!(format_shortcuts(&[]), "none");
+        assert_eq!(
+            format_shortcuts(&[402_653_270, 0x0400_0044]),
+            "Meta+Alt+V|Ctrl+D"
+        );
+    }
+
+    #[test]
+    fn excludes_the_expected_owner_from_conflicts() {
+        let owners = vec![
+            shortcut_info("_launch", "io.github.tinnci.VoxType.desktop"),
+            shortcut_info("other", "org.example.Other.desktop"),
+        ];
+        let conflicts = other_shortcut_owners(
+            &owners,
+            "io.github.tinnci.VoxType.desktop",
+            "_launch",
+            402_653_270,
+        );
+        assert_eq!(conflicts, ["org.example.Other.desktop:other@Meta+Alt+V"]);
+    }
+
+    #[test]
+    fn classifies_inactive_conflict_and_unbound_states() {
+        assert_eq!(classify_shortcut(false, &[1], &[]), ShortcutState::Inactive);
+        assert_eq!(
+            classify_shortcut(true, &[], &["owner".to_owned()]),
+            ShortcutState::Conflict
+        );
+        assert_eq!(classify_shortcut(true, &[], &[]), ShortcutState::Unbound);
+        assert_eq!(classify_shortcut(true, &[1], &[]), ShortcutState::Ok);
+    }
 }

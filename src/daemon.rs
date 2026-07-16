@@ -423,10 +423,10 @@ impl VoxTypeDaemon {
             recording.cancel();
         }
         self.recording_started_at = None;
-        if self.armed_insertion == Some(ArmedInsertion::Fcitx)
-            && let Some(session) = self.machine.state().session()
-        {
-            FcitxBridge.cancel(session);
+        if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
+            if let Some(session) = self.machine.state().session() {
+                FcitxBridge.cancel(session);
+            }
         }
         self.quit = true;
     }
@@ -574,10 +574,12 @@ impl VoxTypeDaemon {
                     continue;
                 }
             };
-            self.provider_usage
-                .entry(provider_id.clone())
-                .or_default()
-                .record_request(audio_millis);
+            if !matches!(&prepared, PreparedProvider::Mock(_)) {
+                self.provider_usage
+                    .entry(provider_id.clone())
+                    .or_default()
+                    .record_request(audio_millis);
+            }
             match invoke_provider(prepared, &recording.path, &language) {
                 Ok(transcript) => {
                     return self.complete_recognition(session, provider_id, transcript, vad_result);

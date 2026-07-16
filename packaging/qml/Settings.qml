@@ -378,6 +378,19 @@ ApplicationWindow {
                                     onClicked: vadThreshold.value = root.calibration.suggested_threshold
                                 }
                             }
+                            Label {
+                                Layout.fillWidth: true
+                                visible: root.calibration !== null
+                                text: !root.calibration ? ""
+                                    : root.calibration.level_status === "clipping"
+                                        ? qsTr("检测到削波：请降低麦克风增益或稍微远离麦克风")
+                                        : root.calibration.level_status === "too-quiet"
+                                            ? qsTr("输入过低：请检查设备、增益或靠近麦克风")
+                                            : qsTr("输入电平正常")
+                                color: root.calibration && root.calibration.level_status === "ok"
+                                    ? "#22c55e" : "#ef4444"
+                                wrapMode: Text.Wrap
+                            }
                         }
                     }
 
@@ -453,6 +466,125 @@ ApplicationWindow {
                         color: "#f59e0b"
                     }
 
+                    Rectangle {
+                        visible: root.state !== null && root.state.onboarding_needed
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 20
+                        Layout.rightMargin: 20
+                        implicitHeight: onboardingLabel.implicitHeight + 24
+                        radius: 10
+                        color: "#24f59e0b"
+                        Label {
+                            id: onboardingLabel
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            text: qsTr("当前只有本地演示 Provider：它会返回固定文本，不执行语音识别。请添加并配置真实云服务后再评估 ASR 效果。")
+                            wrapMode: Text.Wrap
+                            color: "#f59e0b"
+                        }
+                    }
+
+                    GroupBox {
+                        title: qsTr("添加真实云服务")
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 20
+                        Layout.rightMargin: 20
+                        GridLayout {
+                            anchors.fill: parent
+                            columns: 3
+                            columnSpacing: 10
+                            rowSpacing: 8
+
+                            Label { text: qsTr("标识") }
+                            TextField {
+                                id: newProviderId
+                                Layout.fillWidth: true
+                                placeholderText: "work-asr"
+                                validator: RegularExpressionValidator { regularExpression: /[a-z0-9-]{1,64}/ }
+                            }
+                            Label { text: qsTr("小写字母、数字和连字符"); opacity: 0.6 }
+
+                            Label { text: qsTr("协议") }
+                            ComboBox {
+                                id: newProviderKind
+                                Layout.fillWidth: true
+                                model: ["openai-compatible", "deepgram"]
+                            }
+                            Button {
+                                text: qsTr("填充官方默认")
+                                onClicked: {
+                                    if (newProviderKind.currentText === "deepgram") {
+                                        newProviderEndpoint.text = "https://api.deepgram.com/v1/listen"
+                                        newProviderModel.text = "nova-3"
+                                    } else {
+                                        newProviderEndpoint.text = "https://api.openai.com/v1/audio/transcriptions"
+                                        newProviderModel.text = "gpt-4o-mini-transcribe"
+                                    }
+                                }
+                            }
+
+                            Label { text: qsTr("API 端点") }
+                            TextField {
+                                id: newProviderEndpoint
+                                Layout.fillWidth: true
+                                placeholderText: "https://…"
+                            }
+                            Item { Layout.preferredWidth: 1 }
+
+                            Label { text: qsTr("模型") }
+                            TextField {
+                                id: newProviderModel
+                                Layout.fillWidth: true
+                                placeholderText: newProviderKind.currentText === "deepgram" ? "nova-3" : "gpt-4o-mini-transcribe"
+                            }
+                            Item { Layout.preferredWidth: 1 }
+
+                            Label { text: qsTr("语言") }
+                            TextField {
+                                id: newProviderLanguage
+                                Layout.fillWidth: true
+                                text: "zh"
+                            }
+                            CheckBox {
+                                id: newProviderDefault
+                                text: qsTr("设为默认配置")
+                                checked: true
+                            }
+
+                            Item { Layout.preferredWidth: 1 }
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("创建后在下方安全保存 API 密钥。音频只有在实际使用该配置时才会上传。")
+                                wrapMode: Text.Wrap
+                                opacity: 0.65
+                            }
+                            Button {
+                                text: qsTr("创建 Provider 和配置")
+                                highlighted: true
+                                enabled: newProviderId.acceptableInput
+                                    && newProviderEndpoint.text.trim().length > 0
+                                    && newProviderModel.text.trim().length > 0
+                                    && newProviderLanguage.text.trim().length > 0
+                                onClicked: {
+                                    const payload = {
+                                        id: newProviderId.text.trim(),
+                                        kind: newProviderKind.currentText,
+                                        endpoint: newProviderEndpoint.text.trim(),
+                                        model: newProviderModel.text.trim(),
+                                        language: newProviderLanguage.text.trim(),
+                                        make_default: newProviderDefault.checked
+                                    }
+                                    root.callApi("POST", "/provider", JSON.stringify(payload), function(result) {
+                                        newProviderId.clear()
+                                        root.refresh(result.daemon_reloaded
+                                            ? qsTr("Provider 和配置已创建；请继续保存 API 密钥")
+                                            : qsTr("Provider 已创建；daemon 稍后需要重新载入"))
+                                    })
+                                }
+                            }
+                        }
+                    }
+
                     Repeater {
                         model: root.state ? root.state.providers : []
                         delegate: GroupBox {
@@ -468,6 +600,11 @@ ApplicationWindow {
                                 RowLayout {
                                     Layout.fillWidth: true
                                     Label { text: modelData.kind; font.bold: true }
+                                    Label {
+                                        visible: modelData.kind === "mock"
+                                        text: qsTr("演示固定文本 · 不执行 ASR")
+                                        color: "#f59e0b"
+                                    }
                                     Item { Layout.fillWidth: true }
                                     Label {
                                         text: modelData.secret_state === "configured" ? qsTr("密钥已配置")

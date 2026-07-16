@@ -34,6 +34,12 @@ runtime-neutral.
 | Secrets | system `secret-tool` / Secret Service | secret material is not stored in TOML or argv |
 | Desktop | D-Bus, Fcitx socket, QML files, and small system tools | no Qt or KF6 linkage in Rust binaries |
 
+Cloud adapters share one bounded curl runner. It disables user curl
+configuration and redirects, captures numeric HTTP status independently from
+the response body, limits response/diagnostic memory, and maps curl exit codes
+into timeout, connection, authentication, rate-limit, and protocol categories.
+Authorization material still enters through private stdin configuration.
+
 ## Dependency acceptance checklist
 
 For every direct dependency record:

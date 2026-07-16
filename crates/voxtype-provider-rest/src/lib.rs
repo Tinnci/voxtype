@@ -1,12 +1,11 @@
 //! OpenAI-compatible batch transcription through the system `curl` transport.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use voxtype_core::{ErrorCategory, VoxError};
 pub use voxtype_provider_common::SecretString;
-use voxtype_provider_common::escape_curl_config;
+use voxtype_provider_common::{DEFAULT_MAX_RESPONSE_BYTES, escape_curl_config, execute_curl};
 
 #[derive(Debug)]
 pub struct RestProviderConfig {
@@ -56,62 +55,34 @@ fn request(
     wav_path: &Path,
     language: &str,
 ) -> Result<Transcription, VoxError> {
-    let mut command = Command::new("curl");
-    command
-        .args([
-            "--silent",
-            "--show-error",
-            "--fail-with-body",
-            "--location",
-            "--request",
-            "POST",
-            "--max-time",
-            &config.timeout_seconds.to_string(),
-            "--config",
-            "-",
-            "--form",
-            &format!("file=@{};type=audio/wav", wav_path.display()),
-            "--form-string",
-            &format!("model={}", config.model),
-            "--form-string",
-            "response_format=json",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let mut args = vec![
+        "--request".to_owned(),
+        "POST".to_owned(),
+        "--form".to_owned(),
+        format!("file=@{};type=audio/wav", wav_path.display()),
+        "--form-string".to_owned(),
+        format!("model={}", config.model),
+        "--form-string".to_owned(),
+        "response_format=json".to_owned(),
+    ];
     if !language.is_empty() {
-        command.args(["--form-string", &format!("language={language}")]);
+        args.extend(["--form-string".to_owned(), format!("language={language}")]);
     }
-    command.arg(&config.endpoint);
+    args.extend(["--url".to_owned(), config.endpoint.clone()]);
 
-    let mut child = command.spawn().map_err(|error| {
-        VoxError::new(
-            ErrorCategory::Unavailable,
-            "provider.curl_unavailable",
-            format!("could not start curl: {error}"),
-        )
-    })?;
     let config_input = format!(
         "header = \"Authorization: Bearer {}\"\nheader = \"Accept: application/json\"\n",
         escape_curl_config(config.api_key.expose())
     );
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| internal("curl stdin is unavailable"))?
-        .write_all(config_input.as_bytes())
-        .map_err(io_error)?;
-    let output = child.wait_with_output().map_err(io_error)?;
-    if !output.status.success() {
-        let message = String::from_utf8_lossy(&output.stderr);
-        let message_text = sanitize_transport_error(&message);
-        let (category, retryable) = classify_http_failure(&message_text);
-        return Err(
-            VoxError::new(category, "provider.http_failed", message_text).with_retryable(retryable),
-        );
-    }
+    let response = execute_curl(
+        &args,
+        config.timeout_seconds,
+        config_input.as_bytes(),
+        DEFAULT_MAX_RESPONSE_BYTES,
+    )
+    .map_err(|error| error.into_vox_error("provider.http_failed"))?;
 
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+    let value: serde_json::Value = serde_json::from_slice(&response.body).map_err(|error| {
         VoxError::new(
             ErrorCategory::Protocol,
             "provider.invalid_json",
@@ -153,16 +124,6 @@ fn first_u64(object: &serde_json::Map<String, serde_json::Value>, names: &[&str]
         .find_map(|name| object.get(*name).and_then(serde_json::Value::as_u64))
 }
 
-fn classify_http_failure(message: &str) -> (ErrorCategory, bool) {
-    if message.contains("401") || message.contains("403") {
-        (ErrorCategory::Authentication, false)
-    } else if message.contains("429") {
-        (ErrorCategory::RateLimited, true)
-    } else {
-        (ErrorCategory::Unavailable, true)
-    }
-}
-
 /// Validates that a provider endpoint uses HTTPS, except for loopback tests.
 ///
 /// # Errors
@@ -179,49 +140,24 @@ fn pcm_to_wav(pcm_path: &Path) -> io::Result<PathBuf> {
     voxtype_provider_common::pcm_to_wav(pcm_path, "wav")
 }
 
-fn sanitize_transport_error(message: &str) -> String {
-    let first_line = message.lines().next().unwrap_or("HTTP request failed");
-    let truncated = first_line.chars().take(300).collect::<String>();
-    if truncated.is_empty() {
-        "HTTP request failed".to_owned()
-    } else {
-        truncated
-    }
-}
-
 fn io_error(error: io::Error) -> VoxError {
     let message = error.to_string();
     drop(error);
     VoxError::new(ErrorCategory::Internal, "provider.io_failed", message)
 }
 
-fn internal(message: &'static str) -> VoxError {
-    VoxError::new(ErrorCategory::Internal, "provider.internal", message)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn classifies_http_failures_for_routing() {
-        assert_eq!(
-            classify_http_failure("curl: server returned error: 401"),
-            (ErrorCategory::Authentication, false)
-        );
-        assert_eq!(
-            classify_http_failure("curl: server returned error: 429"),
-            (ErrorCategory::RateLimited, true)
-        );
-        assert_eq!(
-            classify_http_failure("curl: connection reset"),
-            (ErrorCategory::Unavailable, true)
-        );
-    }
-    use std::io::Read;
-    use std::net::TcpListener;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener};
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
     #[test]
     fn writes_valid_wav_header() {
@@ -256,68 +192,9 @@ mod tests {
 
     #[test]
     fn transcribes_against_loopback_http() {
-        if Command::new("curl").arg("--version").output().is_err() {
-            return;
-        }
-        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
-        let address = listener.local_addr().expect("listener address");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("request connection");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("read timeout");
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 8 * 1024];
-            loop {
-                match stream.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(count) => {
-                        request.extend_from_slice(&buffer[..count]);
-                        if complete_http_request(&request) {
-                            break;
-                        }
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                        ) =>
-                    {
-                        break;
-                    }
-                    Err(error) => panic!("request read failed: {error}"),
-                }
-            }
-            let request_text = String::from_utf8_lossy(&request);
-            assert!(request_text.contains("Authorization: Bearer test-key"));
-            assert!(request_text.contains("test-model"));
-            assert!(request.windows(4).any(|window| window == b"RIFF"));
-            let body = br#"{"text":"loopback transcript","usage":{"prompt_tokens":11,"completion_tokens":4,"total_tokens":15}}"#;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .expect("response headers");
-            stream.write_all(body).expect("response body");
-        });
-
-        let directory =
-            std::env::temp_dir().join(format!("voxtype-rest-loopback-test-{}", std::process::id()));
-        fs::create_dir_all(&directory).expect("temporary directory");
-        let pcm = directory.join("sample.pcm");
-        fs::write(&pcm, vec![0_u8; 3_200]).expect("PCM fixture");
-        let result = transcribe_pcm(
-            &RestProviderConfig {
-                endpoint: format!("http://{address}/v1/audio/transcriptions"),
-                model: "test-model".to_owned(),
-                api_key: SecretString::new("test-key".to_owned()),
-                timeout_seconds: 5,
-            },
-            &pcm,
-            "zh",
-        )
-        .expect("loopback transcription");
+        let body = br#"{"text":"loopback transcript","usage":{"prompt_tokens":11,"completion_tokens":4,"total_tokens":15}}"#.to_vec();
+        let (address, server) = spawn_response(200, Vec::new(), body, Duration::ZERO);
+        let result = transcribe_fixture(address, 5).expect("loopback transcription");
         assert_eq!(result.text, "loopback transcript");
         assert_eq!(
             result.usage,
@@ -327,8 +204,82 @@ mod tests {
                 total_tokens: Some(15),
             }
         );
+        let request = server.join().expect("loopback server");
+        let request_text = String::from_utf8_lossy(&request);
+        assert!(request_text.contains("Authorization: Bearer test-key"));
+        assert!(request_text.contains("test-model"));
+        assert!(request.windows(4).any(|window| window == b"RIFF"));
+    }
+
+    #[test]
+    fn classifies_actual_http_failures() {
+        for (status, category, retryable) in [
+            (401, ErrorCategory::Authentication, false),
+            (429, ErrorCategory::RateLimited, true),
+            (503, ErrorCategory::Unavailable, true),
+        ] {
+            let (address, server) = spawn_response(
+                status,
+                Vec::new(),
+                br#"{"error":"sanitized fixture"}"#.to_vec(),
+                Duration::ZERO,
+            );
+            let error = transcribe_fixture(address, 5).expect_err("HTTP failure expected");
+            assert_eq!(error.category(), category);
+            assert_eq!(error.is_retryable(), retryable);
+            assert!(error.to_string().contains(&status.to_string()));
+            assert!(!error.to_string().contains("test-key"));
+            server.join().expect("loopback server");
+        }
+    }
+
+    #[test]
+    fn classifies_actual_transport_timeout() {
+        let (address, server) = spawn_response(
+            200,
+            Vec::new(),
+            br#"{"text":"too late"}"#.to_vec(),
+            Duration::from_millis(1_200),
+        );
+        let error = transcribe_fixture(address, 1).expect_err("request must time out");
+        assert_eq!(error.category(), ErrorCategory::Timeout);
+        assert!(error.is_retryable());
+        assert!(!error.to_string().contains("test-key"));
         server.join().expect("loopback server");
-        let _result = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn refuses_redirect_without_contacting_target() {
+        let target = TcpListener::bind("127.0.0.1:0").expect("redirect target");
+        let location = format!(
+            "Location: http://{}/stolen\r\n",
+            target.local_addr().expect("target address")
+        );
+        let (address, server) =
+            spawn_response(302, location.into_bytes(), Vec::new(), Duration::ZERO);
+        let error = transcribe_fixture(address, 5).expect_err("redirect must be rejected");
+        assert_eq!(error.category(), ErrorCategory::Protocol);
+        assert!(!error.is_retryable());
+        server.join().expect("redirect server");
+
+        target
+            .set_nonblocking(true)
+            .expect("nonblocking redirect target");
+        let target_result = target.accept();
+        assert!(matches!(
+            target_result,
+            Err(ref error) if error.kind() == io::ErrorKind::WouldBlock
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_response() {
+        let body = vec![b'x'; DEFAULT_MAX_RESPONSE_BYTES + 1];
+        let (address, server) = spawn_response(200, Vec::new(), body, Duration::ZERO);
+        let error = transcribe_fixture(address, 5).expect_err("response must be bounded");
+        assert_eq!(error.category(), ErrorCategory::Protocol);
+        assert!(!error.is_retryable());
+        server.join().expect("loopback server");
     }
 
     #[test]
@@ -350,6 +301,99 @@ mod tests {
                 total_tokens: Some(15),
             }
         );
+    }
+
+    fn transcribe_fixture(
+        address: SocketAddr,
+        timeout_seconds: u64,
+    ) -> Result<Transcription, VoxError> {
+        assert_curl_available();
+        let unique = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "voxtype-rest-loopback-{}-{timestamp}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("temporary directory");
+        let pcm = directory.join("sample.pcm");
+        fs::write(&pcm, vec![0_u8; 3_200]).expect("PCM fixture");
+        let result = transcribe_pcm(
+            &RestProviderConfig {
+                endpoint: format!("http://{address}/v1/audio/transcriptions"),
+                model: "test-model".to_owned(),
+                api_key: SecretString::new("test-key".to_owned()),
+                timeout_seconds,
+            },
+            &pcm,
+            "zh",
+        );
+        let _ = fs::remove_dir_all(directory);
+        result
+    }
+
+    fn spawn_response(
+        status: u16,
+        extra_headers: Vec<u8>,
+        body: Vec<u8>,
+        delay: Duration,
+    ) -> (SocketAddr, thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let request = read_request(&mut stream);
+            thread::sleep(delay);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(&extra_headers);
+            let _ = stream.write_all(b"\r\n");
+            let _ = stream.write_all(&body);
+            request
+        });
+        (address, server)
+    }
+
+    fn read_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    request.extend_from_slice(&buffer[..count]);
+                    if complete_http_request(&request) {
+                        break;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => panic!("request read failed: {error}"),
+            }
+        }
+        request
+    }
+
+    fn assert_curl_available() {
+        let output = Command::new("curl")
+            .arg("--version")
+            .output()
+            .expect("curl must be installed for transport tests");
+        assert!(output.status.success(), "curl --version failed");
     }
 
     fn complete_http_request(request: &[u8]) -> bool {

@@ -1,12 +1,11 @@
 //! Deepgram prerecorded speech recognition through the system `curl` transport.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use voxtype_core::{ErrorCategory, VoxError};
 pub use voxtype_provider_common::SecretString;
-use voxtype_provider_common::escape_curl_config;
+use voxtype_provider_common::{DEFAULT_MAX_RESPONSE_BYTES, escape_curl_config, execute_curl};
 
 #[derive(Debug)]
 pub struct DeepgramConfig {
@@ -48,57 +47,29 @@ fn request(
     language: &str,
 ) -> Result<Transcription, VoxError> {
     let url = request_url(config, language);
-    let mut command = Command::new("curl");
-    command
-        .args([
-            "--silent",
-            "--show-error",
-            "--fail-with-body",
-            "--location",
-            "--request",
-            "POST",
-            "--max-time",
-            &config.timeout_seconds.to_string(),
-            "--config",
-            "-",
-            "--header",
-            "Content-Type: application/octet-stream",
-            "--data-binary",
-            &format!("@{}", wav_path.display()),
-            &url,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = command.spawn().map_err(|error| {
-        VoxError::new(
-            ErrorCategory::Unavailable,
-            "provider.deepgram.curl_unavailable",
-            format!("could not start curl: {error}"),
-        )
-    })?;
+    let args = [
+        "--request".to_owned(),
+        "POST".to_owned(),
+        "--header".to_owned(),
+        "Content-Type: application/octet-stream".to_owned(),
+        "--data-binary".to_owned(),
+        format!("@{}", wav_path.display()),
+        "--url".to_owned(),
+        url,
+    ];
     let config_input = format!(
         "header = \"Authorization: Token {}\"\nheader = \"Accept: application/json\"\n",
         escape_curl_config(config.api_key.expose())
     );
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| internal("curl stdin is unavailable"))?
-        .write_all(config_input.as_bytes())
-        .map_err(io_error)?;
-    let output = child.wait_with_output().map_err(io_error)?;
-    if !output.status.success() {
-        let message = sanitize_transport_error(&String::from_utf8_lossy(&output.stderr));
-        let (category, retryable) = classify_http_failure(&message);
-        return Err(
-            VoxError::new(category, "provider.deepgram.http_failed", message)
-                .with_retryable(retryable),
-        );
-    }
+    let response = execute_curl(
+        args,
+        config.timeout_seconds,
+        config_input.as_bytes(),
+        DEFAULT_MAX_RESPONSE_BYTES,
+    )
+    .map_err(|error| error.into_vox_error("provider.deepgram.http_failed"))?;
 
-    parse_transcription(&output.stdout)
+    parse_transcription(&response.body)
 }
 
 fn parse_transcription(response: &[u8]) -> Result<Transcription, VoxError> {
@@ -158,18 +129,6 @@ fn encode_query(value: &str) -> String {
     encoded
 }
 
-fn classify_http_failure(message: &str) -> (ErrorCategory, bool) {
-    if message.contains("401") || message.contains("403") {
-        (ErrorCategory::Authentication, false)
-    } else if message.contains("400") || message.contains("404") || message.contains("422") {
-        (ErrorCategory::Protocol, false)
-    } else if message.contains("429") {
-        (ErrorCategory::RateLimited, true)
-    } else {
-        (ErrorCategory::Unavailable, true)
-    }
-}
-
 /// Validates that an endpoint uses HTTPS, except for loopback integration tests.
 ///
 /// # Errors
@@ -182,16 +141,6 @@ pub fn validate_endpoint(endpoint: &str) -> Result<(), VoxError> {
     )
 }
 
-fn sanitize_transport_error(message: &str) -> String {
-    let first_line = message.lines().next().unwrap_or("Deepgram request failed");
-    let truncated = first_line.chars().take(300).collect::<String>();
-    if truncated.is_empty() {
-        "Deepgram request failed".to_owned()
-    } else {
-        truncated
-    }
-}
-
 fn io_error(error: io::Error) -> VoxError {
     let message = error.to_string();
     drop(error);
@@ -202,19 +151,12 @@ fn io_error(error: io::Error) -> VoxError {
     )
 }
 
-fn internal(message: &'static str) -> VoxError {
-    VoxError::new(
-        ErrorCategory::Internal,
-        "provider.deepgram.internal",
-        message,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::process::Command;
     use std::thread;
     use std::time::Duration;
 
@@ -241,26 +183,6 @@ mod tests {
     }
 
     #[test]
-    fn classifies_provider_failures() {
-        assert_eq!(
-            classify_http_failure("server returned 401"),
-            (ErrorCategory::Authentication, false)
-        );
-        assert_eq!(
-            classify_http_failure("server returned 422"),
-            (ErrorCategory::Protocol, false)
-        );
-        assert_eq!(
-            classify_http_failure("server returned 429"),
-            (ErrorCategory::RateLimited, true)
-        );
-        assert_eq!(
-            classify_http_failure("connection reset"),
-            (ErrorCategory::Unavailable, true)
-        );
-    }
-
-    #[test]
     fn rejects_malformed_or_empty_transcripts() {
         assert!(parse_transcription(b"not-json").is_err());
         assert!(
@@ -273,9 +195,11 @@ mod tests {
 
     #[test]
     fn transcribes_against_loopback_http() {
-        if Command::new("curl").arg("--version").output().is_err() {
-            return;
-        }
+        let output = Command::new("curl")
+            .arg("--version")
+            .output()
+            .expect("curl must be installed for transport tests");
+        assert!(output.status.success(), "curl --version failed");
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
         let address = listener.local_addr().expect("listener address");
         let server = thread::spawn(move || {

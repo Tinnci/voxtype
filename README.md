@@ -73,6 +73,12 @@ Default Plasma shortcuts:
 - `Meta+Alt+Escape`: cancel dictation.
 - `Meta+Alt+G`: check the most recently inserted transcript locally.
 
+Run `voxtype doctor shortcut` to inspect KGlobalAccel directly. It reports the
+current and default sequence for each action and distinguishes a missing
+component, missing action, inactive component, unbound shortcut, and a sequence
+owned by another registered action. Merely finding the desktop action name is
+not treated as proof that the shortcut is usable.
+
 Open `VoxType Settings` from the application launcher, run
 `voxtype-settings`, or use the microphone tray menu. The Fcitx5 Input Method
 KCM also exposes VoxType through the configurable bridge addon.

@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use voxtype_core::{ErrorCategory, ReplayPolicy, VoxError};
+use voxtype_core::{ErrorCategory, ProviderId, ReplayPolicy, VoxError};
 use voxtype_provider_deepgram::{
     SecretString as DeepgramSecretString, validate_endpoint as validate_deepgram_endpoint,
 };
@@ -226,15 +226,7 @@ impl Config {
         if !self.profiles.contains_key(&self.default_profile) {
             return Err(configuration("default_profile does not exist"));
         }
-        for (name, profile) in &self.profiles {
-            for provider in std::iter::once(&profile.primary).chain(&profile.fallbacks) {
-                if !self.providers.contains_key(provider) {
-                    return Err(configuration(&format!(
-                        "profile {name} references unknown provider {provider}"
-                    )));
-                }
-            }
-        }
+        validate_routes(self)?;
         for provider in self.providers.values() {
             match provider {
                 ProviderConfig::Mock { text } if text.trim().is_empty() => {
@@ -273,17 +265,15 @@ impl Config {
             if let ProviderConfig::Deepgram { endpoint, .. } = provider {
                 validate_deepgram_endpoint(endpoint)?;
             }
-            if let ProviderConfig::Command { program, .. } = provider
-                && program.trim().is_empty()
-            {
-                return Err(configuration("command provider program is empty"));
-            }
-            if let ProviderConfig::Command { program, .. } = provider
-                && !std::path::Path::new(program).is_absolute()
-            {
-                return Err(configuration(
-                    "command provider program must be an absolute path",
-                ));
+            if let ProviderConfig::Command { program, .. } = provider {
+                if program.trim().is_empty() {
+                    return Err(configuration("command provider program is empty"));
+                }
+                if !std::path::Path::new(program).is_absolute() {
+                    return Err(configuration(
+                        "command provider program must be an absolute path",
+                    ));
+                }
             }
         }
         for (provider, quota) in &self.quotas {
@@ -505,6 +495,28 @@ fn default_language() -> String {
     "zh".to_owned()
 }
 
+fn validate_routes(config: &Config) -> Result<(), VoxError> {
+    for provider in config.providers.keys() {
+        ProviderId::new(provider.clone()).map_err(|error| configuration(error.message()))?;
+    }
+    for (name, profile) in &config.profiles {
+        let mut route = std::collections::BTreeSet::new();
+        for provider in std::iter::once(&profile.primary).chain(&profile.fallbacks) {
+            if !config.providers.contains_key(provider) {
+                return Err(configuration(&format!(
+                    "profile {name} references unknown provider {provider}"
+                )));
+            }
+            if !route.insert(provider) {
+                return Err(configuration(&format!(
+                    "profile {name} contains duplicate provider {provider}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 const fn default_timeout() -> u64 {
     30
 }
@@ -549,6 +561,27 @@ mod tests {
             .get_mut("test")
             .expect("test profile")
             .primary = "missing".to_owned();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_and_duplicate_provider_routes() {
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        let mock = config.providers.remove("mock").expect("mock provider");
+        config.providers.insert("bad_provider".to_owned(), mock);
+        config
+            .profiles
+            .get_mut("test")
+            .expect("test profile")
+            .primary = "bad_provider".to_owned();
+        assert!(config.validate().is_err());
+
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        config
+            .profiles
+            .get_mut("test")
+            .expect("test profile")
+            .fallbacks = vec!["mock".to_owned()];
         assert!(config.validate().is_err());
     }
 

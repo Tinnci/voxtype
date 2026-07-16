@@ -37,7 +37,9 @@ to the core/application domain rather than one provider crate.
 
 The deterministic mock provider remains available only as an explicit demo and
 test fixture. It must not be the completed first-run experience or count as a
-cloud request/quota consumption event.
+cloud request/quota consumption event. The settings panel now labels the demo
+and can create a real provider/profile; a fuller onboarding flow still needs a
+credential test and live recognition confirmation.
 
 ## Layer 3: KDE, Fcitx, and insertion
 
