@@ -152,8 +152,8 @@ fn frame_levels(pcm: &[u8]) -> (Vec<u16>, u16) {
             square_sum = square_sum.saturating_add(value.saturating_mul(value));
             samples += 1;
         }
-        if samples > 0 {
-            levels.push(u16::try_from(integer_sqrt(square_sum / samples)).unwrap_or(u16::MAX));
+        if let Some(mean_square) = square_sum.checked_div(samples) {
+            levels.push(u16::try_from(integer_sqrt(mean_square)).unwrap_or(u16::MAX));
         }
     }
     (levels, peak)
