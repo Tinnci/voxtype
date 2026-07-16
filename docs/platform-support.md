@@ -38,6 +38,8 @@ no kernel-module dependency and does not require a system reboot.
 - The Fcitx bridge is the preferred safe insertion path and rejects password or
   sensitive contexts.
 - Clipboard plus `ydotool` is an explicit fallback, not equivalent security.
+  The daemon service does not start or require `ydotool`; users who explicitly
+  select the clipboard-paste backend manage that optional helper separately.
 - The settings application is standalone Qt/QML. KDE adds tray, shortcut,
   notification, desktop-entry, and Fcitx-KCM entry points without owning the
   configuration engine.

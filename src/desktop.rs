@@ -68,6 +68,25 @@ impl ClipboardInserter {
             backend: "wl-copy+ydotool",
         })
     }
+
+    /// Copies Unicode text without synthesizing keyboard input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if clipboard ownership cannot be acquired.
+    pub fn copy(&self, text: &str) -> io::Result<InsertionResult> {
+        if text.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to copy empty text",
+            ));
+        }
+        write_clipboard(text.as_bytes())?;
+        Ok(InsertionResult {
+            clipboard_restored: false,
+            backend: "copy-only",
+        })
+    }
 }
 
 fn read_clipboard() -> Option<Vec<u8>> {

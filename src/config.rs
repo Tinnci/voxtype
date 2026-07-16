@@ -19,10 +19,12 @@ default_profile = "test"
 [desktop]
 restore_clipboard = true
 retain_recordings = false
+transcript_history_enabled = false
 insertion_backend = "fcitx"
 
 [audio]
 minimum_duration_millis = 250
+maximum_duration_seconds = 120
 vad_enabled = true
 vad_rms_threshold = 300
 vad_minimum_voiced_frames = 2
@@ -57,6 +59,7 @@ pub struct Config {
 pub struct DesktopConfig {
     pub restore_clipboard: bool,
     pub retain_recordings: bool,
+    pub transcript_history_enabled: bool,
     pub insertion_backend: InsertionBackend,
 }
 
@@ -65,6 +68,7 @@ impl Default for DesktopConfig {
         Self {
             restore_clipboard: true,
             retain_recordings: false,
+            transcript_history_enabled: false,
             insertion_backend: InsertionBackend::Fcitx,
         }
     }
@@ -76,6 +80,7 @@ pub enum InsertionBackend {
     #[default]
     Fcitx,
     Clipboard,
+    Copy,
     Auto,
 }
 
@@ -83,6 +88,7 @@ pub enum InsertionBackend {
 #[serde(default)]
 pub struct AudioConfig {
     pub minimum_duration_millis: u64,
+    pub maximum_duration_seconds: u64,
     pub vad_enabled: bool,
     pub vad_rms_threshold: u16,
     pub vad_minimum_voiced_frames: u32,
@@ -92,6 +98,7 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             minimum_duration_millis: 250,
+            maximum_duration_seconds: 120,
             vad_enabled: true,
             vad_rms_threshold: 300,
             vad_minimum_voiced_frames: 2,
@@ -295,6 +302,11 @@ impl Config {
         if self.audio.vad_rms_threshold == 0 || self.audio.vad_rms_threshold > 10_000 {
             return Err(configuration(
                 "VAD RMS threshold must be between 1 and 10000",
+            ));
+        }
+        if !(5..=3_600).contains(&self.audio.maximum_duration_seconds) {
+            return Err(configuration(
+                "maximum recording duration must be between 5 and 3600 seconds",
             ));
         }
         if !(1..=100).contains(&self.audio.vad_minimum_voiced_frames) {
@@ -538,6 +550,22 @@ mod tests {
             .expect("test profile")
             .primary = "missing".to_owned();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_recording_safety_limit() {
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        assert_eq!(config.audio.maximum_duration_seconds, 120);
+        config.audio.maximum_duration_seconds = 4;
+        assert!(config.validate().is_err());
+        config.audio.maximum_duration_seconds = 3_601;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn transcript_history_is_private_by_default() {
+        let config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        assert!(!config.desktop.transcript_history_enabled);
     }
 
     #[test]

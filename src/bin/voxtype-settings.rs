@@ -291,10 +291,12 @@ fn settings_state() -> io::Result<Value> {
             "insertion_backend": insertion_backend_name(config.desktop.insertion_backend),
             "restore_clipboard": config.desktop.restore_clipboard,
             "retain_recordings": config.desktop.retain_recordings,
+            "transcript_history_enabled": config.desktop.transcript_history_enabled,
             "vad_enabled": config.audio.vad_enabled,
             "vad_rms_threshold": config.audio.vad_rms_threshold,
             "vad_minimum_voiced_frames": config.audio.vad_minimum_voiced_frames,
             "minimum_duration_millis": config.audio.minimum_duration_millis,
+            "maximum_duration_seconds": config.audio.maximum_duration_seconds,
         },
         "providers": providers,
     }))
@@ -316,15 +318,18 @@ fn empty_usage() -> Value {
 }
 
 #[derive(Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // Mirrors independent settings checkboxes in the wire payload.
 struct GeneralUpdate {
     default_profile: String,
     insertion_backend: String,
     restore_clipboard: bool,
     retain_recordings: bool,
+    transcript_history_enabled: bool,
     vad_enabled: bool,
     vad_rms_threshold: u16,
     vad_minimum_voiced_frames: u32,
     minimum_duration_millis: u64,
+    maximum_duration_seconds: u64,
 }
 
 fn save_general(body: &[u8]) -> io::Result<Response> {
@@ -334,15 +339,18 @@ fn save_general(body: &[u8]) -> io::Result<Response> {
     config.desktop.insertion_backend = match update.insertion_backend.as_str() {
         "fcitx" => InsertionBackend::Fcitx,
         "clipboard" => InsertionBackend::Clipboard,
+        "copy" => InsertionBackend::Copy,
         "auto" => InsertionBackend::Auto,
         _ => return Ok(Response::error(400, "unsupported insertion backend")),
     };
     config.desktop.restore_clipboard = update.restore_clipboard;
     config.desktop.retain_recordings = update.retain_recordings;
+    config.desktop.transcript_history_enabled = update.transcript_history_enabled;
     config.audio.vad_enabled = update.vad_enabled;
     config.audio.vad_rms_threshold = update.vad_rms_threshold;
     config.audio.vad_minimum_voiced_frames = update.vad_minimum_voiced_frames;
     config.audio.minimum_duration_millis = update.minimum_duration_millis;
+    config.audio.maximum_duration_seconds = update.maximum_duration_seconds;
     persist_and_reload(&config)
 }
 
@@ -513,6 +521,7 @@ fn insertion_backend_name(backend: InsertionBackend) -> &'static str {
     match backend {
         InsertionBackend::Fcitx => "fcitx",
         InsertionBackend::Clipboard => "clipboard",
+        InsertionBackend::Copy => "copy",
         InsertionBackend::Auto => "auto",
     }
 }

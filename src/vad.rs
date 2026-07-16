@@ -104,7 +104,9 @@ pub fn analyze_pcm(pcm: &[u8], config: VadConfig) -> VadResult {
             release = 0;
             if !in_speech && attack >= config.minimum_voiced_frames {
                 in_speech = true;
-                speech_start = Some(index.saturating_add(1).saturating_sub(attack));
+                if speech_start.is_none() {
+                    speech_start = Some(index.saturating_add(1).saturating_sub(attack));
+                }
             }
             if in_speech {
                 speech_end = Some(index.saturating_add(1));
@@ -260,6 +262,21 @@ mod tests {
         let result = analyze_pcm(&frames(&[2_000; 8]), CONFIG);
         assert!(result.speech_detected);
         assert_eq!(result.adaptive_threshold, 1_200);
+    }
+
+    #[test]
+    fn preserves_first_segment_across_a_long_pause() {
+        let mut levels = vec![100; 10];
+        levels.extend([2_000; 6]);
+        levels.extend([100; 20]);
+        levels.extend([2_000; 6]);
+        levels.extend([100; 10]);
+        let result = analyze_pcm(&frames(&levels), CONFIG);
+        assert!(result.speech_detected);
+        assert_eq!(result.speech_start_frame, Some(10));
+        assert_eq!(result.speech_end_frame, Some(42));
+        assert_eq!(result.trim_start_frame, Some(2));
+        assert_eq!(result.trim_end_frame, Some(52));
     }
 
     #[test]

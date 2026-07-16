@@ -236,8 +236,22 @@ ApplicationWindow {
                             ComboBox {
                                 id: backendBox
                                 Layout.fillWidth: true
-                                model: ["fcitx", "auto", "clipboard"]
+                                model: ["fcitx", "auto", "clipboard", "copy"]
                                 currentIndex: root.state ? model.indexOf(root.state.general.insertion_backend) : 0
+                            }
+
+                            Item { Layout.preferredWidth: 1 }
+                            Label {
+                                Layout.fillWidth: true
+                                text: backendBox.currentText === "fcitx"
+                                    ? qsTr("锁定录音开始时的 Fcitx 输入上下文；焦点变化或密码字段会拒绝提交。")
+                                    : backendBox.currentText === "copy"
+                                        ? qsTr("只复制识别结果，不模拟按键；适合无法安全注入的应用。")
+                                        : backendBox.currentText === "clipboard"
+                                            ? qsTr("通过剪贴板和 ydotool 粘贴，兼容性较高但不提供原生焦点锁定。")
+                                            : qsTr("优先使用 Fcitx；仅在录音开始时桥接不可用才选择剪贴板兼容路径。")
+                                wrapMode: Text.Wrap
+                                opacity: 0.65
                             }
 
                             Label { text: qsTr("最短录音") }
@@ -249,6 +263,17 @@ ApplicationWindow {
                                     value: root.state ? root.state.general.minimum_duration_millis : 250
                                 }
                                 Label { text: qsTr("毫秒"); opacity: 0.7 }
+                            }
+
+                            Label { text: qsTr("最长录音") }
+                            RowLayout {
+                                SpinBox {
+                                    id: maximumDuration
+                                    from: 5
+                                    to: 3600
+                                    value: root.state ? root.state.general.maximum_duration_seconds : 120
+                                }
+                                Label { text: qsTr("秒"); opacity: 0.7 }
                             }
 
                             Label { text: qsTr("本地 VAD") }
@@ -293,6 +318,17 @@ ApplicationWindow {
                                 id: retainRecordings
                                 text: qsTr("保留录音文件（仅建议调试时启用）")
                                 checked: root.state ? root.state.general.retain_recordings : false
+                            }
+                            CheckBox {
+                                id: transcriptHistory
+                                text: qsTr("在内存中保留最近 20 条语音输入，用于语法检查")
+                                checked: root.state ? root.state.general.transcript_history_enabled : false
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("历史记录默认关闭，只存在于当前 daemon 会话；关闭并保存时会立即清除。")
+                                wrapMode: Text.Wrap
+                                opacity: 0.65
                             }
                         }
                     }
@@ -366,10 +402,12 @@ ApplicationWindow {
                                     insertion_backend: backendBox.currentText,
                                     restore_clipboard: restoreClipboard.checked,
                                     retain_recordings: retainRecordings.checked,
+                                    transcript_history_enabled: transcriptHistory.checked,
                                     vad_enabled: vadEnabled.checked,
                                     vad_rms_threshold: vadThreshold.value,
                                     vad_minimum_voiced_frames: vadFrames.value,
-                                    minimum_duration_millis: minimumDuration.value
+                                    minimum_duration_millis: minimumDuration.value,
+                                    maximum_duration_seconds: maximumDuration.value
                                 }
                                 root.callApi("POST", "/general", JSON.stringify(payload), function(result) {
                                     root.refresh(result.daemon_reloaded

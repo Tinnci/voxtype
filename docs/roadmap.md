@@ -2,7 +2,8 @@
 
 Current status: the headless/KDE vertical slice, OpenAI-compatible batch
 provider, official Deepgram batch provider, local command provider, Fcitx5
-focus-safe insertion, settings, VAD, and desktop integration are implemented.
+focus-safe insertion, copy-only fallback, recording safety deadline, settings,
+VAD, and desktop integration are implemented.
 The unofficial Doubao WebSocket/Opus spike remains intentionally deferred until
 terms and client-identity requirements are resolved.
 

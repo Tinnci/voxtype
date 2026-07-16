@@ -33,6 +33,7 @@ pub struct VoxTypeDaemon {
     provider_health: std::collections::BTreeMap<String, ProviderHealthState>,
     provider_usage: std::collections::BTreeMap<String, ProviderUsageState>,
     transcript_history: VecDeque<String>,
+    recording_started_at: Option<Instant>,
     quit: bool,
 }
 
@@ -40,6 +41,7 @@ pub struct VoxTypeDaemon {
 enum ArmedInsertion {
     Fcitx,
     Clipboard,
+    Copy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -261,11 +263,12 @@ impl VoxTypeDaemon {
         let armed = match self.config.desktop.insertion_backend {
             InsertionBackend::Fcitx => FcitxBridge.arm(&session).map(|()| ArmedInsertion::Fcitx),
             InsertionBackend::Clipboard => Ok(ArmedInsertion::Clipboard),
-            InsertionBackend::Auto => Ok(if FcitxBridge.arm(&session).is_ok() {
-                ArmedInsertion::Fcitx
-            } else {
-                ArmedInsertion::Clipboard
-            }),
+            InsertionBackend::Copy => Ok(ArmedInsertion::Copy),
+            InsertionBackend::Auto => match FcitxBridge.arm(&session) {
+                Ok(()) => Ok(ArmedInsertion::Fcitx),
+                Err(error) if may_auto_fallback_from_fcitx(&error) => Ok(ArmedInsertion::Clipboard),
+                Err(error) => Err(error),
+            },
         };
         match armed {
             Ok(armed) => self.armed_insertion = Some(armed),
@@ -281,6 +284,7 @@ impl VoxTypeDaemon {
         match Recording::start() {
             Ok(recording) => {
                 self.recording = Some(recording);
+                self.recording_started_at = Some(Instant::now());
                 self.active_profile = Some(profile_name);
                 self.machine
                     .apply(Command::CaptureReady {
@@ -326,6 +330,7 @@ impl VoxTypeDaemon {
             .recording
             .take()
             .ok_or_else(|| fdo::Error::Failed("recording process is missing".to_owned()))?;
+        self.recording_started_at = None;
         let result = recording
             .stop()
             .map_err(|error| fdo::Error::Failed(format!("failed to stop capture: {error}")))?;
@@ -365,6 +370,7 @@ impl VoxTypeDaemon {
         if let Some(recording) = self.recording.take() {
             recording.cancel();
         }
+        self.recording_started_at = None;
         if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
             FcitxBridge.cancel(&active);
         }
@@ -394,6 +400,9 @@ impl VoxTypeDaemon {
         let config = Config::load_or_create().map_err(map_error)?;
         self.inserter = ClipboardInserter::default().with_restore(config.desktop.restore_clipboard);
         self.config = config;
+        if !self.config.desktop.transcript_history_enabled {
+            self.transcript_history.clear();
+        }
         self.provider_health.clear();
         Ok(())
     }
@@ -413,6 +422,7 @@ impl VoxTypeDaemon {
         if let Some(recording) = self.recording.take() {
             recording.cancel();
         }
+        self.recording_started_at = None;
         if self.armed_insertion == Some(ArmedInsertion::Fcitx)
             && let Some(session) = self.machine.state().session()
         {
@@ -450,6 +460,7 @@ impl VoxTypeDaemon {
             provider_health: std::collections::BTreeMap::new(),
             provider_usage: std::collections::BTreeMap::new(),
             transcript_history: VecDeque::with_capacity(20),
+            recording_started_at: None,
             quit: false,
         })
     }
@@ -457,6 +468,31 @@ impl VoxTypeDaemon {
     #[must_use]
     pub const fn should_quit_value(&self) -> bool {
         self.quit
+    }
+
+    /// Stops a recording that exceeded the configured safety duration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error if stopping or recognition fails.
+    pub fn enforce_recording_deadline(&mut self) -> fdo::Result<bool> {
+        let Some(started_at) = self.recording_started_at else {
+            return Ok(false);
+        };
+        if !recording_deadline_reached(
+            started_at.elapsed(),
+            self.config.audio.maximum_duration_seconds,
+        ) {
+            return Ok(false);
+        }
+        overlay(
+            "processing",
+            "Maximum duration reached",
+            "Stopping safely and processing captured speech",
+            0,
+        );
+        self.stop("")?;
+        Ok(true)
     }
 
     fn active_session_id(&self, requested: &str) -> fdo::Result<SessionId> {
@@ -614,17 +650,29 @@ impl VoxTypeDaemon {
                 session: session.clone(),
             })
             .map_err(map_error)?;
-        if self.transcript_history.len() == 20 {
-            self.transcript_history.pop_front();
+        if self.config.desktop.transcript_history_enabled {
+            if self.transcript_history.len() == 20 {
+                self.transcript_history.pop_front();
+            }
+            self.transcript_history.push_back(text.clone());
         }
-        self.transcript_history.push_back(text.clone());
-        notify("VoxType", "Dictation inserted");
-        overlay(
-            "done",
-            "Text inserted",
-            "Meta+Alt+G checks recent grammar",
-            2_000,
-        );
+        if insertion.backend == "copy-only" {
+            notify("VoxType", "Dictation copied to clipboard");
+            overlay(
+                "done",
+                "Text copied",
+                "Paste it when the intended field is ready",
+                3_000,
+            );
+        } else {
+            notify("VoxType", "Dictation inserted");
+            overlay(
+                "done",
+                "Text inserted",
+                "Meta+Alt+G checks recent grammar",
+                2_000,
+            );
+        }
         Ok(format!(
             "session={session} provider={provider_id} chars={} backend={} clipboard_restored={} vad={}",
             text.chars().count(),
@@ -956,6 +1004,19 @@ impl VoxTypeDaemon {
                     clipboard_restored: result.clipboard_restored,
                 })
             }
+            Some(ArmedInsertion::Copy) => {
+                let result = self.inserter.copy(text).map_err(|error| {
+                    VoxError::new(
+                        ErrorCategory::Unavailable,
+                        "desktop.copy_failed",
+                        error.to_string(),
+                    )
+                })?;
+                Ok(CompletedInsertion {
+                    backend: result.backend,
+                    clipboard_restored: result.clipboard_restored,
+                })
+            }
             None => Err(VoxError::new(
                 ErrorCategory::InvalidState,
                 "desktop.not_armed",
@@ -975,6 +1036,17 @@ fn notify(summary: &str, body: &str) {
     let _result = ProcessCommand::new("notify-send")
         .args(["--app-name=VoxType", summary, body])
         .spawn();
+}
+
+const fn recording_deadline_reached(elapsed: Duration, maximum_seconds: u64) -> bool {
+    elapsed.as_secs() >= maximum_seconds
+}
+
+fn may_auto_fallback_from_fcitx(error: &VoxError) -> bool {
+    matches!(
+        error.code(),
+        "fcitx.transport_failed" | "fcitx.runtime_unavailable"
+    )
 }
 
 fn overlay(state: &str, title: &str, body: &str, timeout_millis: u32) {
@@ -1032,6 +1104,34 @@ mod tests {
         assert_eq!(usage.audio_millis, 2_000);
         assert_eq!(usage.token_reports, 1);
         assert_eq!(usage.reported_tokens, 15);
+    }
+
+    #[test]
+    fn recording_deadline_is_inclusive() {
+        assert!(!recording_deadline_reached(Duration::from_secs(119), 120));
+        assert!(recording_deadline_reached(Duration::from_secs(120), 120));
+    }
+
+    #[test]
+    fn auto_fallback_never_bypasses_focus_or_security_rejection() {
+        let secure = VoxError::new(
+            ErrorCategory::Permission,
+            "fcitx.bridge_rejected",
+            "secure context",
+        );
+        let missing_focus = VoxError::new(
+            ErrorCategory::InvalidState,
+            "fcitx.bridge_rejected",
+            "no focused context",
+        );
+        let unavailable = VoxError::new(
+            ErrorCategory::Unavailable,
+            "fcitx.transport_failed",
+            "socket unavailable",
+        );
+        assert!(!may_auto_fallback_from_fcitx(&secure));
+        assert!(!may_auto_fallback_from_fcitx(&missing_focus));
+        assert!(may_auto_fallback_from_fcitx(&unavailable));
     }
 
     #[test]

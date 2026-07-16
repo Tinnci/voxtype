@@ -167,7 +167,8 @@ private:
         } else if (command == "ARM") {
             response = arm(field(message, 1));
         } else if (command == "COMMIT") {
-            response = commit(field(message, 1), field(message, 2));
+            commit(field(message, 1), field(message, 2), sender, senderLength);
+            return;
         } else if (command == "CANCEL") {
             response = cancel(field(message, 1));
         } else {
@@ -194,38 +195,59 @@ private:
         return response;
     }
 
-    std::string commit(std::string_view session, std::string_view text) {
+    void commit(std::string_view session, std::string_view text,
+                sockaddr_un sender, socklen_t senderLength) {
         auto *context = armedContext_.get();
         if (session != armedSession_) {
-            return response("ERR", "session-mismatch");
+            sendResponse(response("ERR", "session-mismatch"), sender,
+                         senderLength);
+            return;
         }
         if (!context || !context->hasFocus() ||
             context != instance_->lastFocusedInputContext()) {
             clear();
-            return response("ERR", "focus-changed");
+            sendResponse(response("ERR", "focus-changed"), sender,
+                         senderLength);
+            return;
         }
         if (isSecure(context)) {
             clear();
-            return response("ERR", "secure-context");
+            sendResponse(response("ERR", "secure-context"), sender,
+                         senderLength);
+            return;
         }
         if (text.empty()) {
-            return response("ERR", "empty-text");
+            sendResponse(response("ERR", "empty-text"), sender,
+                         senderLength);
+            return;
         }
         const std::string pendingText(text);
         pendingCommit_ = instance_->eventLoop().addDeferEvent(
-            [this, pendingText](EventSource *) {
+            [this, pendingText, sender, senderLength](EventSource *) {
                 auto *pendingContext = armedContext_.get();
+                std::string result;
                 if (pendingContext && pendingContext->hasFocus() &&
                     pendingContext == instance_->lastFocusedInputContext() &&
                     !isSecure(pendingContext)) {
                     pendingContext->commitString(pendingText);
+                    result = response("OK", "committed");
+                } else if (pendingContext && isSecure(pendingContext)) {
+                    result = response("ERR", "secure-context");
+                } else {
+                    result = response("ERR", "focus-changed");
                 }
                 armedContext_.unwatch();
                 armedSession_.clear();
+                sendResponse(result, sender, senderLength);
                 return true;
             });
         pendingCommit_->setOneShot();
-        return response("OK", "queued");
+    }
+
+    void sendResponse(const std::string &value, const sockaddr_un &recipient,
+                      socklen_t recipientLength) const {
+        sendto(socketFd_, value.data(), value.size(), 0,
+               reinterpret_cast<const sockaddr *>(&recipient), recipientLength);
     }
 
     std::string cancel(std::string_view session) {

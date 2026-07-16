@@ -19,6 +19,20 @@ Provider endpoints and models remain visible in the panel and can always be
 edited directly in TOML. API keys are never written to TOML or shown after
 storage.
 
+The general panel also exposes two safety/privacy controls:
+
+- `maximum_duration_seconds` automatically stops an accidentally abandoned
+  recording (120 seconds by default, accepted range 5–3600 seconds);
+- recent transcript history is disabled by default. When explicitly enabled,
+  at most 20 items are retained in daemon memory for local grammar checks and
+  are erased when the option is disabled or the daemon exits.
+
+Insertion backends are `fcitx` (strict focus lock), `auto` (Fcitx when
+available, otherwise the explicit clipboard compatibility path), `clipboard`
+(copy plus authorized synthetic paste), and `copy` (clipboard only, with no
+keyboard injection). Copy-only mode is the safest portable fallback when an
+application does not expose a usable input-method context.
+
 ## Voice activity detection and trimming
 
 The local VAD analyzes 20 ms PCM frames without an external DSP library. The

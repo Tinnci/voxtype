@@ -15,11 +15,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         let interface = connection
             .object_server()
             .interface::<_, VoxTypeDaemon>(DBUS_PATH)?;
-        if interface.get().should_quit_value() {
+        let mut daemon = interface.get_mut();
+        if daemon.should_quit_value() {
             break;
         }
+        if let Err(error) = daemon.enforce_recording_deadline() {
+            eprintln!("voxtyped deadline handling failed: {error}");
+        }
+        drop(daemon);
         drop(interface);
-        thread::sleep(Duration::from_millis(250));
+        thread::sleep(Duration::from_millis(100));
     }
     Ok(())
 }

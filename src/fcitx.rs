@@ -92,7 +92,7 @@ impl FcitxBridge {
     /// addon transport failure. Callers must not silently fall back after this.
     pub fn commit(self, session: &SessionId, text: &str) -> Result<(), VoxError> {
         let response = request(&[b"COMMIT", session.as_str().as_bytes(), text.as_bytes()])?;
-        expect_ok(&response)
+        expect_committed(&response)
     }
 
     /// Clears any armed input context for the session.
@@ -186,6 +186,20 @@ fn expect_ok(response: &[u8]) -> Result<(), VoxError> {
     ))
 }
 
+fn expect_committed(response: &[u8]) -> Result<(), VoxError> {
+    expect_ok(response)?;
+    let detail = response.split(|byte| *byte == 0).nth(1).unwrap_or_default();
+    if detail == b"committed" {
+        Ok(())
+    } else {
+        Err(VoxError::new(
+            ErrorCategory::Protocol,
+            "fcitx.commit_unconfirmed",
+            "Fcitx bridge did not confirm the text commit",
+        ))
+    }
+}
+
 fn runtime_dir() -> Result<PathBuf, VoxError> {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -230,6 +244,13 @@ mod tests {
     #[test]
     fn accepts_ok_response() {
         expect_ok(b"OK\0armed").expect("OK response");
+    }
+
+    #[test]
+    fn commit_requires_final_confirmation() {
+        expect_committed(b"OK\0committed").expect("confirmed commit");
+        let error = expect_committed(b"OK\0queued").expect_err("queued is not committed");
+        assert_eq!(error.code(), "fcitx.commit_unconfirmed");
     }
 
     #[test]

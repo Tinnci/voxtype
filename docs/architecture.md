@@ -80,6 +80,8 @@ facade crates or one-trait packages remain explicitly discouraged.
 - Audio queues are bounded and cancellation-aware.
 - Intermediate transcripts are events; only final transcripts may be inserted.
 - Text insertion is a negotiated capability with a copy-only fallback.
+- Automatic insertion fallback is allowed only for an unavailable Fcitx
+  transport; focus and secure-field rejection are terminal safety decisions.
 - Secrets are represented by opaque references outside the secret-store module.
 - Provider-specific identifiers never become the application's core identity.
 - Core interfaces use `std` types and project-owned newtypes; adapters translate

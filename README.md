@@ -30,7 +30,9 @@ providers, desktop integration, audio capture, and text insertion replaceable.
 - Qt 6 settings panel for provider status, safe API-key updates, VAD/input
   settings, session-local consumption, and user-defined soft quotas.
 - Frameless KDE overlay, local energy VAD, and an in-memory recent-transcript
-  grammar/typography checker.
+  grammar/typography checker that is disabled by default for privacy.
+- Configurable maximum recording duration and a copy-only insertion mode for
+  environments where focus-safe native commit is unavailable.
 - Hardened systemd user services and user-level desktop/D-Bus packaging.
 
 ## Install on Plasma 6
@@ -79,6 +81,7 @@ KCM also exposes VoxType through the configurable bridge addon.
 
 - [Product requirements](docs/requirements.md)
 - [Architecture](docs/architecture.md)
+- [Implementation layers and replacement plan](docs/implementation-layers.md)
 - [API contracts](docs/api-contracts.md)
 - [Doubao protocol analysis](docs/doubao-api-analysis.md)
 - [Deepgram provider](docs/deepgram-provider.md)

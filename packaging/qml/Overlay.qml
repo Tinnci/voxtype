@@ -92,12 +92,14 @@ Window {
                     Layout.fillWidth: true
                 }
                 Rectangle {
+                    id: progressTrack
                     visible: root.stateName === "processing"
                     Layout.fillWidth: true
                     Layout.preferredHeight: 3
                     radius: 2
                     color: "#30ffffff"
                     Rectangle {
+                        id: progressBar
                         width: parent.width * 0.36
                         height: parent.height
                         radius: parent.radius
@@ -105,8 +107,8 @@ Window {
                         SequentialAnimation on x {
                             running: root.stateName === "processing"
                             loops: Animation.Infinite
-                            NumberAnimation { from: 0; to: parent.parent.width - parent.width; duration: 800; easing.type: Easing.InOutQuad }
-                            NumberAnimation { from: parent.parent.width - parent.width; to: 0; duration: 800; easing.type: Easing.InOutQuad }
+                            NumberAnimation { from: 0; to: progressTrack.width - progressBar.width; duration: 800; easing.type: Easing.InOutQuad }
+                            NumberAnimation { from: progressTrack.width - progressBar.width; to: 0; duration: 800; easing.type: Easing.InOutQuad }
                         }
                     }
                 }

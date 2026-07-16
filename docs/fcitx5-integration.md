@@ -11,6 +11,9 @@ stable native addon API is C++.
 - records the currently focused Fcitx `InputContext` at `ARM`;
 - rejects Password/Sensitive contexts;
 - rechecks focus, context identity, and secure flags before committing;
+- acknowledges success only after the deferred `commitString` call actually
+  passes its final focus/security check, so the daemon cannot record a queued
+  but silently dropped insertion as successful;
 - defers `commitString` to the next Fcitx event-loop turn;
 - never performs audio capture, network access, secret lookup, or clipboard work.
 - exposes one standard Fcitx external-config action that launches
