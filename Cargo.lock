@@ -713,6 +713,8 @@ dependencies = [
  "serde_json",
  "toml",
  "voxtype-core",
+ "voxtype-provider-common",
+ "voxtype-provider-deepgram",
  "voxtype-provider-rest",
  "zbus",
 ]
@@ -722,12 +724,29 @@ name = "voxtype-core"
 version = "0.1.0-dev"
 
 [[package]]
+name = "voxtype-provider-common"
+version = "0.1.0-dev"
+dependencies = [
+ "voxtype-core",
+ "zeroize",
+]
+
+[[package]]
+name = "voxtype-provider-deepgram"
+version = "0.1.0-dev"
+dependencies = [
+ "serde_json",
+ "voxtype-core",
+ "voxtype-provider-common",
+]
+
+[[package]]
 name = "voxtype-provider-rest"
 version = "0.1.0-dev"
 dependencies = [
  "serde_json",
  "voxtype-core",
- "zeroize",
+ "voxtype-provider-common",
 ]
 
 [[package]]

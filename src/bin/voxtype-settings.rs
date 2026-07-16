@@ -9,12 +9,14 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
+use voxtype::audio::Recording;
 use voxtype::client::Client;
 use voxtype::config::{
     Config, InsertionBackend, ProviderConfig, ProviderQuotaConfig, config_path, secret_state,
     store_secret,
 };
 use voxtype::qml;
+use voxtype::vad::{self, VadConfig};
 use zbus::blocking::Connection;
 
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
@@ -158,6 +160,7 @@ fn route(request: &Request<'_>) -> io::Result<Response> {
     match (request.method, request.path) {
         ("GET", "/state") => settings_state().map(|value| Response::json(&value)),
         ("POST", "/general") => save_general(request.body),
+        ("POST", "/calibrate") => calibrate_microphone(),
         ("POST", "/open-config") => open_config(),
         ("POST", path) if path.starts_with("/provider/") => {
             save_provider(&percent_decode(&path[10..])?, request.body)
@@ -170,6 +173,32 @@ fn route(request: &Request<'_>) -> io::Result<Response> {
         }
         _ => Ok(Response::error(404, "settings endpoint not found")),
     }
+}
+
+fn calibrate_microphone() -> io::Result<Response> {
+    let config = Config::load_or_create().map_err(domain_io)?;
+    let recording = Recording::start()?;
+    thread::sleep(Duration::from_millis(2_500));
+    let recording = recording.stop()?;
+    let result = vad::analyze_file(
+        &recording.path,
+        VadConfig {
+            rms_threshold: config.audio.vad_rms_threshold,
+            minimum_voiced_frames: config.audio.vad_minimum_voiced_frames,
+        },
+    );
+    let _ = fs::remove_file(&recording.path);
+    let result = result?;
+    Ok(Response::json(&json!({
+        "noise_floor": result.noise_floor,
+        "average_rms": result.average_rms,
+        "peak": result.peak,
+        "adaptive_threshold": result.adaptive_threshold,
+        "suggested_threshold": result.noise_floor.saturating_mul(2).saturating_add(80),
+        "speech_ratio": if result.total_frames == 0 { 0.0 } else {
+            f64::from(result.voiced_frames) / f64::from(result.total_frames)
+        },
+    })))
 }
 
 fn settings_state() -> io::Result<Value> {
@@ -186,35 +215,55 @@ fn settings_state() -> io::Result<Value> {
         .providers
         .iter()
         .map(|(id, provider)| {
-            let (kind, endpoint, model, secret_ref, state, timeout_seconds) = match provider {
-                ProviderConfig::Mock { .. } => ("mock", "", "", "", "not-required", Value::Null),
-                ProviderConfig::OpenaiCompatible {
-                    endpoint,
-                    model,
-                    secret,
-                    timeout_seconds,
-                    ..
-                } => (
-                    "openai-compatible",
-                    endpoint.as_str(),
-                    model.as_str(),
-                    secret.as_str(),
-                    secret_state(secret),
-                    json!(timeout_seconds),
-                ),
-                ProviderConfig::Command {
-                    program,
-                    timeout_seconds,
-                    ..
-                } => (
-                    "command",
-                    program.as_str(),
-                    "",
-                    "",
-                    "not-required",
-                    json!(timeout_seconds),
-                ),
-            };
+            let (kind, endpoint, model, secret_ref, state, timeout_seconds, smart_format) =
+                match provider {
+                    ProviderConfig::Mock { .. } => {
+                        ("mock", "", "", "", "not-required", Value::Null, Value::Null)
+                    }
+                    ProviderConfig::OpenaiCompatible {
+                        endpoint,
+                        model,
+                        secret,
+                        timeout_seconds,
+                        ..
+                    } => (
+                        "openai-compatible",
+                        endpoint.as_str(),
+                        model.as_str(),
+                        secret.as_str(),
+                        secret_state(secret),
+                        json!(timeout_seconds),
+                        Value::Null,
+                    ),
+                    ProviderConfig::Deepgram {
+                        endpoint,
+                        model,
+                        secret,
+                        timeout_seconds,
+                        smart_format,
+                    } => (
+                        "deepgram",
+                        endpoint.as_str(),
+                        model.as_str(),
+                        secret.as_str(),
+                        secret_state(secret),
+                        json!(timeout_seconds),
+                        json!(smart_format),
+                    ),
+                    ProviderConfig::Command {
+                        program,
+                        timeout_seconds,
+                        ..
+                    } => (
+                        "command",
+                        program.as_str(),
+                        "",
+                        "",
+                        "not-required",
+                        json!(timeout_seconds),
+                        Value::Null,
+                    ),
+                };
             let live_usage = usage
                 .pointer(&format!("/providers/{}/usage", json_pointer_escape(id)))
                 .cloned()
@@ -227,6 +276,7 @@ fn settings_state() -> io::Result<Value> {
                 "secret_ref": secret_ref,
                 "secret_state": state,
                 "timeout_seconds": timeout_seconds,
+                "smart_format": smart_format,
                 "usage": live_usage,
                 "quota": config.quotas.get(id).cloned().unwrap_or_default(),
             })
@@ -301,6 +351,7 @@ struct RestProviderUpdate {
     endpoint: String,
     model: String,
     timeout_seconds: u64,
+    smart_format: Option<bool>,
 }
 
 fn save_provider(provider: &str, body: &[u8]) -> io::Result<Response> {
@@ -309,21 +360,38 @@ fn save_provider(provider: &str, body: &[u8]) -> io::Result<Response> {
     let Some(provider_config) = config.providers.get_mut(provider) else {
         return Ok(Response::error(404, "provider is not configured"));
     };
-    let ProviderConfig::OpenaiCompatible {
-        endpoint,
-        model,
-        timeout_seconds,
-        ..
-    } = provider_config
-    else {
-        return Ok(Response::error(
-            400,
-            "only OpenAI-compatible providers have editable API settings",
-        ));
-    };
-    *endpoint = update.endpoint;
-    *model = update.model;
-    *timeout_seconds = update.timeout_seconds;
+    match provider_config {
+        ProviderConfig::OpenaiCompatible {
+            endpoint,
+            model,
+            timeout_seconds,
+            ..
+        } => {
+            *endpoint = update.endpoint;
+            *model = update.model;
+            *timeout_seconds = update.timeout_seconds;
+        }
+        ProviderConfig::Deepgram {
+            endpoint,
+            model,
+            timeout_seconds,
+            smart_format,
+            ..
+        } => {
+            *endpoint = update.endpoint;
+            *model = update.model;
+            *timeout_seconds = update.timeout_seconds;
+            if let Some(value) = update.smart_format {
+                *smart_format = value;
+            }
+        }
+        ProviderConfig::Mock { .. } | ProviderConfig::Command { .. } => {
+            return Ok(Response::error(
+                400,
+                "this provider does not have editable cloud API settings",
+            ));
+        }
+    }
     persist_and_reload(&config)
 }
 
@@ -362,7 +430,7 @@ fn save_quota(provider: &str, body: &[u8]) -> io::Result<Response> {
 fn save_secret(name: &str, body: &[u8]) -> io::Result<Response> {
     let config = Config::load_or_create().map_err(domain_io)?;
     let known = config.providers.values().any(|provider| {
-        matches!(provider, ProviderConfig::OpenaiCompatible { secret, .. } if secret == name)
+        matches!(provider, ProviderConfig::OpenaiCompatible { secret, .. } | ProviderConfig::Deepgram { secret, .. } if secret == name)
     });
     if !known {
         return Ok(Response::error(404, "secret reference is not configured"));

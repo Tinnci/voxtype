@@ -45,6 +45,10 @@ second service.
   errors, and audio contracts.
 - `voxtype-provider-rest`: WAV staging, system-curl transport, JSON response and
   provider-reported usage parsing.
+- `voxtype-provider-deepgram`: official Deepgram binary-upload request and
+  nested transcript response parsing.
+- `voxtype-provider-common`: audited credential redaction, endpoint validation,
+  and PCM-to-WAV staging shared only after two cloud adapters proved the need.
 - root `voxtype` package: daemon orchestration, audio process adapter, D-Bus,
   configuration, Secret Service, VAD, grammar, Fcitx/clipboard insertion, and
   thin CLI/tray/settings/overlay binaries.

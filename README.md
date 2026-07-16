@@ -23,8 +23,9 @@ providers, desktop integration, audio capture, and text insertion replaceable.
   freedesktop notifications.
 - Focus-locked Fcitx5 native commit with secure-field rejection, plus an
   explicit clipboard/ydotool compatibility backend.
-- OpenAI-compatible REST, deterministic mock, and isolated local-command
-  providers with fallback health tracking.
+- OpenAI-compatible multipart REST, official Deepgram prerecorded REST,
+  deterministic mock, and isolated local-command providers with fallback
+  health tracking.
 - XDG TOML configuration and KWallet/Secret Service credential references.
 - Qt 6 settings panel for provider status, safe API-key updates, VAD/input
   settings, session-local consumption, and user-defined soft quotas.
@@ -80,6 +81,7 @@ KCM also exposes VoxType through the configurable bridge addon.
 - [Architecture](docs/architecture.md)
 - [API contracts](docs/api-contracts.md)
 - [Doubao protocol analysis](docs/doubao-api-analysis.md)
+- [Deepgram provider](docs/deepgram-provider.md)
 - [Dependency and build policy](docs/dependencies-and-builds.md)
 - [Local KDE input-method audit](docs/local-kde-ime-audit.md)
 - [Configuration and providers](docs/configuration.md)

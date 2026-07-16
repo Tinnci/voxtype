@@ -10,6 +10,8 @@ ApplicationWindow {
     property var state: null
     property string message: qsTr("正在读取设置…")
     property bool messageError: false
+    property var calibration: null
+    property bool calibrating: false
 
     width: 960
     height: 720
@@ -32,6 +34,7 @@ ApplicationWindow {
             if (request.status >= 200 && request.status < 300) {
                 callback(result)
             } else {
+                root.calibrating = false
                 root.messageError = true
                 root.message = result && result.error ? result.error : qsTr("设置请求失败")
             }
@@ -294,6 +297,54 @@ ApplicationWindow {
                         }
                     }
 
+                    GroupBox {
+                        title: qsTr("麦克风与 VAD 校准")
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 20
+                        Layout.rightMargin: 20
+                        ColumnLayout {
+                            anchors.fill: parent
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("录制 2.5 秒本地样本，估算环境噪声和动态阈值。样本不会上传，分析后立即删除。开始时先保持安静，再说一句短句。")
+                                wrapMode: Text.Wrap
+                                opacity: 0.75
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Button {
+                                    text: root.calibrating ? qsTr("正在校准…") : qsTr("开始校准")
+                                    enabled: !root.calibrating
+                                    onClicked: {
+                                        root.calibrating = true
+                                        root.message = qsTr("正在录制校准样本…")
+                                        root.callApi("POST", "/calibrate", "", function(result) {
+                                            root.calibration = result
+                                            root.calibrating = false
+                                            root.messageError = false
+                                            root.message = qsTr("校准完成；请确认建议值后再保存")
+                                        })
+                                    }
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    visible: root.calibration !== null
+                                    text: root.calibration ? qsTr("噪声 %1 · 动态阈值 %2 · 峰值 %3 · 语音占比 %4%")
+                                        .arg(root.calibration.noise_floor)
+                                        .arg(root.calibration.adaptive_threshold)
+                                        .arg(root.calibration.peak)
+                                        .arg(Math.round(root.calibration.speech_ratio * 100)) : ""
+                                    elide: Text.ElideRight
+                                }
+                                Button {
+                                    visible: root.calibration !== null
+                                    text: qsTr("采用建议阈值")
+                                    onClicked: vadThreshold.value = root.calibration.suggested_threshold
+                                }
+                            }
+                        }
+                    }
+
                     RowLayout {
                         Layout.fillWidth: true
                         Layout.leftMargin: 20
@@ -355,6 +406,14 @@ ApplicationWindow {
                         wrapMode: Text.Wrap
                         opacity: 0.75
                     }
+                    Label {
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 22
+                        Layout.rightMargin: 22
+                        text: qsTr("隐私提示：选择 OpenAI-compatible 或 Deepgram 云服务时，麦克风录音会发送给对应服务。只有配置 buffered-with-consent 时才允许将同一录音重放给 fallback Provider。")
+                        wrapMode: Text.Wrap
+                        color: "#f59e0b"
+                    }
 
                     Repeater {
                         model: root.state ? root.state.providers : []
@@ -388,6 +447,7 @@ ApplicationWindow {
                                 }
                                 GridLayout {
                                     visible: modelData.kind === "openai-compatible"
+                                        || modelData.kind === "deepgram"
                                     columns: 3
                                     Layout.fillWidth: true
                                     columnSpacing: 10
@@ -397,7 +457,9 @@ ApplicationWindow {
                                         id: endpointInput
                                         Layout.fillWidth: true
                                         text: modelData.endpoint
-                                        placeholderText: "https://…/v1/audio/transcriptions"
+                                        placeholderText: modelData.kind === "deepgram"
+                                            ? "https://api.deepgram.com/v1/listen"
+                                            : "https://…/v1/audio/transcriptions"
                                     }
                                     Item { Layout.preferredWidth: 1 }
                                     Label { text: qsTr("模型") }
@@ -407,6 +469,20 @@ ApplicationWindow {
                                         text: modelData.model
                                     }
                                     Item { Layout.preferredWidth: 1 }
+                                    Label {
+                                        visible: modelData.kind === "deepgram"
+                                        text: qsTr("智能格式化")
+                                    }
+                                    CheckBox {
+                                        id: smartFormatInput
+                                        visible: modelData.kind === "deepgram"
+                                        text: qsTr("启用标点和易读格式")
+                                        checked: modelData.smart_format === null ? true : modelData.smart_format
+                                    }
+                                    Item {
+                                        visible: modelData.kind === "deepgram"
+                                        Layout.preferredWidth: 1
+                                    }
                                     Label { text: qsTr("超时") }
                                     SpinBox {
                                         id: timeoutInput
@@ -421,7 +497,9 @@ ApplicationWindow {
                                             const payload = {
                                                 endpoint: endpointInput.text.trim(),
                                                 model: modelInput.text.trim(),
-                                                timeout_seconds: timeoutInput.value
+                                                timeout_seconds: timeoutInput.value,
+                                                smart_format: modelData.kind === "deepgram"
+                                                    ? smartFormatInput.checked : null
                                             }
                                             root.callApi("POST", "/provider/" + encodeURIComponent(modelData.id),
                                                 JSON.stringify(payload), function(result) {

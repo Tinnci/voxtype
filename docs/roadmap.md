@@ -1,5 +1,11 @@
 # Delivery roadmap
 
+Current status: the headless/KDE vertical slice, OpenAI-compatible batch
+provider, official Deepgram batch provider, local command provider, Fcitx5
+focus-safe insertion, settings, VAD, and desktop integration are implemented.
+The unofficial Doubao WebSocket/Opus spike remains intentionally deferred until
+terms and client-identity requirements are resolved.
+
 ## Phase 0: decisions and spikes
 
 - Resolve licensing and reuse strategy.
@@ -8,7 +14,7 @@
 - Capture and resample microphone audio through PipeWire.
 - Validate a minimal Rust WebSocket/Opus ASR session with sanitized fixtures.
 - Select a second online provider with an official or stable API and run both
-  implementations through a shared provider contract test kit.
+  implementations through shared endpoint, secret, WAV, and loopback contracts.
 
 Exit criterion: select one viable end-to-end KDE path without root privileges.
 

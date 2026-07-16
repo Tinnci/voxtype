@@ -60,6 +60,8 @@ The current workspace intentionally has no feature matrix:
 ```text
 voxtype                    application library + thin CLI/daemon/tray binaries
 crates/voxtype-core        dependency-free domain policy and state machine
+crates/voxtype-provider-common  audited secret/endpoint/WAV helpers
+crates/voxtype-provider-deepgram  official Deepgram prerecorded adapter
 crates/voxtype-provider-rest  REST/WAV/JSON adapter
 ```
 
@@ -120,6 +122,9 @@ cargo test -p voxtype-core
 
 # REST provider and its loopback protocol test only.
 cargo test -p voxtype-provider-rest
+
+# Independent Deepgram request/response contract and loopback transport.
+cargo test -p voxtype-provider-deepgram
 
 # Application type-check without linking release binaries.
 cargo check -p voxtype

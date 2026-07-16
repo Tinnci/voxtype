@@ -19,6 +19,22 @@ Provider endpoints and models remain visible in the panel and can always be
 edited directly in TOML. API keys are never written to TOML or shown after
 storage.
 
+## Voice activity detection and trimming
+
+The local VAD analyzes 20 ms PCM frames without an external DSP library. The
+configured RMS threshold is an absolute lower bound; VoxType also estimates the
+room noise floor from a low percentile and raises the effective threshold when
+needed. Consecutive loud frames enter the speech state, while a release window
+prevents short pauses from ending an utterance.
+
+When speech is found, cloud and command providers receive a trimmed recording
+with 160 ms of pre-roll and 300 ms of post-roll. This preserves fast consonant
+onsets and natural endings while avoiding needless silence upload. The settings
+panel can record a 2.5-second local calibration sample and show the noise floor,
+dynamic threshold, peak, and speech ratio. Calibration audio is never uploaded
+and is deleted immediately after analysis; suggested values are only applied
+after explicit confirmation.
+
 ## Test profile
 
 The development default uses a deterministic mock provider. It exercises real
@@ -42,7 +58,7 @@ Do not mistake a successful mock run for ASR quality verification.
 ## Local command providers
 
 For a local model or an existing wrapper, use a command provider. VoxType starts
-the program without a shell and exposes the captured WAV and language through
+the program without a shell and exposes the captured raw 16 kHz mono s16le PCM and language through
 environment variables. The command must print only the transcript to stdout.
 
 ```toml
@@ -97,6 +113,33 @@ printf '%s' "$API_KEY" | voxtype secret set cloud-a-api-key
 Avoid placing the command in shell history with a literal key. Interactive
 secret entry is also available in the settings panel.
 
+## Deepgram provider
+
+Deepgram uses its official prerecorded speech-to-text API and is a separate
+protocol implementation rather than an OpenAI-compatible endpoint:
+
+```toml
+[profiles.deepgram-zh]
+primary = "deepgram"
+fallbacks = []
+language = "zh"
+replay = "never"
+
+[providers.deepgram]
+kind = "deepgram"
+endpoint = "https://api.deepgram.com/v1/listen"
+model = "nova-3"
+secret = "deepgram-api-key"
+timeout_seconds = 30
+smart_format = true
+```
+
+Store `deepgram-api-key` from the settings panel or with `voxtype secret set`.
+VoxType uploads a temporary WAV body with `Authorization: Token`; the key is
+passed to `curl` through private stdin configuration and is not exposed in the
+process arguments. See [Deepgram provider](deepgram-provider.md) for the API,
+privacy, and failure boundary.
+
 ## Consumption and soft quotas
 
 VoxType separates three different kinds of data:
@@ -120,6 +163,10 @@ Every limit is optional and must be positive. View the same data as JSON with
 `voxtype usage`, or as progress meters in `voxtype-settings`. Counters currently
 cover the lifetime of the running daemon and reset when it restarts; the panel
 labels this scope explicitly.
+
+Deepgram's prerecorded response does not provide token billing counters, so its
+token value remains “not reported”. Request and audio-duration counters remain
+available; VoxType never estimates tokens from transcript length.
 
 ## Fallback privacy policy
 

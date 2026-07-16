@@ -12,11 +12,19 @@ Window {
     readonly property color accent: stateName === "listening" ? "#ef4444"
         : stateName === "processing" ? "#f59e0b"
         : stateName === "error" ? "#dc2626"
+        : stateName === "no-speech" ? "#64748b"
+        : stateName === "cancelled" ? "#64748b"
         : stateName === "grammar" ? "#8b5cf6"
         : "#22c55e"
+    readonly property string stateIcon: stateName === "listening" ? "●"
+        : stateName === "processing" ? "↻"
+        : stateName === "done" ? "✓"
+        : stateName === "grammar" ? "Aa"
+        : stateName === "no-speech" ? "∿"
+        : stateName === "cancelled" ? "×" : "!"
 
-    width: 360
-    height: detail.length > 0 ? 104 : 78
+    width: 400
+    height: detail.length > 0 ? 112 : 82
     x: Math.round((Screen.width - width) / 2)
     y: Screen.height - height - 96
     color: "transparent"
@@ -43,7 +51,7 @@ Window {
 
                 Text {
                     anchors.centerIn: parent
-                    text: root.stateName === "grammar" ? "✓" : "●"
+                    text: root.stateIcon
                     color: "white"
                     font.pixelSize: 22
                     font.bold: true
@@ -54,6 +62,13 @@ Window {
                     loops: Animation.Infinite
                     NumberAnimation { to: 1.12; duration: 500; easing.type: Easing.InOutQuad }
                     NumberAnimation { to: 1.0; duration: 500; easing.type: Easing.InOutQuad }
+                }
+                RotationAnimation on rotation {
+                    running: root.stateName === "processing"
+                    loops: Animation.Infinite
+                    from: 0
+                    to: 360
+                    duration: 900
                 }
             }
 
@@ -75,6 +90,25 @@ Window {
                     font.pixelSize: 13
                     elide: Text.ElideRight
                     Layout.fillWidth: true
+                }
+                Rectangle {
+                    visible: root.stateName === "processing"
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 3
+                    radius: 2
+                    color: "#30ffffff"
+                    Rectangle {
+                        width: parent.width * 0.36
+                        height: parent.height
+                        radius: parent.radius
+                        color: root.accent
+                        SequentialAnimation on x {
+                            running: root.stateName === "processing"
+                            loops: Animation.Infinite
+                            NumberAnimation { from: 0; to: parent.parent.width - parent.width; duration: 800; easing.type: Easing.InOutQuad }
+                            NumberAnimation { from: parent.parent.width - parent.width; to: 0; duration: 800; easing.type: Easing.InOutQuad }
+                        }
+                    }
                 }
             }
         }

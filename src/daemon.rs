@@ -2,7 +2,7 @@
 
 use crate::{
     audio::{Recording, RecordingResult, cleanup_stale_recordings},
-    config::{Config, InsertionBackend, ProviderConfig, lookup_secret},
+    config::{Config, InsertionBackend, ProviderConfig, lookup_deepgram_secret, lookup_secret},
     desktop::ClipboardInserter,
     fcitx::FcitxBridge,
     grammar,
@@ -18,6 +18,7 @@ use voxtype_core::{
     Command, CommandEffect, ErrorCategory, ReplayPolicy, SessionId, SessionMachine, StartRequest,
     TriggerMode, VoxError,
 };
+use voxtype_provider_deepgram::{DeepgramConfig, transcribe_pcm as transcribe_deepgram_pcm};
 use voxtype_provider_rest::{ApiUsage, RestProviderConfig, transcribe_pcm};
 use zbus::fdo;
 
@@ -77,6 +78,7 @@ struct ProviderTranscript {
 enum PreparedProvider {
     Mock(String),
     Rest(RestProviderConfig),
+    Deepgram(DeepgramConfig),
     Command {
         program: String,
         args: Vec<String>,
@@ -85,7 +87,10 @@ enum PreparedProvider {
 }
 
 enum VoiceActivity {
-    Continue(Option<VadResult>),
+    Continue {
+        result: Option<VadResult>,
+        audio_millis: u64,
+    },
     NoSpeech(String),
 }
 
@@ -216,10 +221,13 @@ impl VoxTypeDaemon {
         let body = if report.is_clean() {
             "No local grammar issues found".to_owned()
         } else {
-            format!(
-                "{} suggestion(s) · see CLI for details",
-                report.issues.len()
-            )
+            report
+                .issues
+                .iter()
+                .take(2)
+                .map(|issue| issue.message)
+                .collect::<Vec<_>>()
+                .join(" · ")
         };
         overlay("grammar", "Grammar check", &body, 5_000);
         Ok(report.render())
@@ -476,8 +484,11 @@ impl VoxTypeDaemon {
             return Ok(response);
         }
 
-        let vad_result = match self.check_voice_activity(session, recording)? {
-            VoiceActivity::Continue(result) => result,
+        let (vad_result, audio_millis) = match self.check_voice_activity(session, recording)? {
+            VoiceActivity::Continue {
+                result,
+                audio_millis,
+            } => (result, audio_millis),
             VoiceActivity::NoSpeech(response) => return Ok(response),
         };
 
@@ -530,7 +541,7 @@ impl VoxTypeDaemon {
             self.provider_usage
                 .entry(provider_id.clone())
                 .or_default()
-                .record_request(recording.duration_millis);
+                .record_request(audio_millis);
             match invoke_provider(prepared, &recording.path, &language) {
                 Ok(transcript) => {
                     return self.complete_recognition(session, provider_id, transcript, vad_result);
@@ -622,8 +633,15 @@ impl VoxTypeDaemon {
             vad_result.map_or_else(
                 || "disabled".to_owned(),
                 |result| format!(
-                    "speech:{}/{}:rms={}:peak={}",
-                    result.voiced_frames, result.total_frames, result.average_rms, result.peak
+                    "speech:{}/{}:rms={}:noise={}:threshold={}:trim={}-{}:peak={}",
+                    result.voiced_frames,
+                    result.total_frames,
+                    result.average_rms,
+                    result.noise_floor,
+                    result.adaptive_threshold,
+                    result.trim_start_frame.unwrap_or_default(),
+                    result.trim_end_frame.unwrap_or_default(),
+                    result.peak
                 )
             )
         ))
@@ -635,7 +653,10 @@ impl VoxTypeDaemon {
         recording: &RecordingResult,
     ) -> fdo::Result<VoiceActivity> {
         if !self.config.audio.vad_enabled {
-            return Ok(VoiceActivity::Continue(None));
+            return Ok(VoiceActivity::Continue {
+                result: None,
+                audio_millis: recording.duration_millis,
+            });
         }
         let result = vad::analyze_file(
             &recording.path,
@@ -646,7 +667,12 @@ impl VoxTypeDaemon {
         )
         .map_err(|error| fdo::Error::Failed(format!("VAD analysis failed: {error}")))?;
         if result.speech_detected {
-            return Ok(VoiceActivity::Continue(Some(result)));
+            let trimmed_bytes = vad::trim_file(&recording.path, &result)
+                .map_err(|error| fdo::Error::Failed(format!("audio trim failed: {error}")))?;
+            return Ok(VoiceActivity::Continue {
+                result: Some(result),
+                audio_millis: trimmed_bytes.saturating_mul(1_000) / 32_000,
+            });
         }
         if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
             FcitxBridge.cancel(session);
@@ -658,14 +684,19 @@ impl VoxTypeDaemon {
             .map_err(map_error)?;
         notify("VoxType", "No speech detected");
         overlay(
-            "idle",
+            "no-speech",
             "No speech detected",
             "Try speaking closer to the microphone",
             2_200,
         );
         Ok(VoiceActivity::NoSpeech(format!(
-            "session={session} result=no-speech vad_voiced_frames={} vad_total_frames={} average_rms={} peak={}",
-            result.voiced_frames, result.total_frames, result.average_rms, result.peak
+            "session={session} result=no-speech vad_voiced_frames={} vad_total_frames={} average_rms={} noise_floor={} threshold={} peak={}",
+            result.voiced_frames,
+            result.total_frames,
+            result.average_rms,
+            result.noise_floor,
+            result.adaptive_threshold,
+            result.peak
         )))
     }
 
@@ -687,7 +718,7 @@ impl VoxTypeDaemon {
             .map_err(map_error)?;
         notify("VoxType", "Recording was too short");
         overlay(
-            "idle",
+            "no-speech",
             "Recording too short",
             "Hold the shortcut a little longer",
             2_000,
@@ -753,6 +784,22 @@ impl VoxTypeDaemon {
                     timeout_seconds: *timeout_seconds,
                 }))
             }
+            ProviderConfig::Deepgram {
+                endpoint,
+                model,
+                secret,
+                timeout_seconds,
+                smart_format,
+            } => {
+                let api_key = lookup_deepgram_secret(secret)?;
+                Ok(PreparedProvider::Deepgram(DeepgramConfig {
+                    endpoint: endpoint.clone(),
+                    model: model.clone(),
+                    api_key,
+                    timeout_seconds: *timeout_seconds,
+                    smart_format: *smart_format,
+                }))
+            }
             ProviderConfig::Command {
                 program,
                 args,
@@ -782,6 +829,11 @@ fn invoke_provider(
                 api_usage: result.usage,
             })
         }
+        PreparedProvider::Deepgram(config) => transcribe_deepgram_pcm(&config, pcm_path, language)
+            .map(|result| ProviderTranscript {
+                text: result.text,
+                api_usage: ApiUsage::default(),
+            }),
         PreparedProvider::Command {
             program,
             args,

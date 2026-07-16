@@ -8,8 +8,10 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use voxtype_core::{ErrorCategory, ReplayPolicy, VoxError};
-use voxtype_provider_rest::SecretString;
-use voxtype_provider_rest::validate_endpoint;
+use voxtype_provider_deepgram::{
+    SecretString as DeepgramSecretString, validate_endpoint as validate_deepgram_endpoint,
+};
+use voxtype_provider_rest::{SecretString, validate_endpoint};
 
 const DEFAULT_CONFIG: &str = r#"schema_version = 1
 default_profile = "test"
@@ -140,6 +142,15 @@ pub enum ProviderConfig {
         #[serde(default = "default_timeout")]
         timeout_seconds: u64,
     },
+    Deepgram {
+        endpoint: String,
+        model: String,
+        secret: String,
+        #[serde(default = "default_timeout")]
+        timeout_seconds: u64,
+        #[serde(default = "default_true")]
+        smart_format: bool,
+    },
     Command {
         program: String,
         #[serde(default)]
@@ -223,16 +234,20 @@ impl Config {
                     return Err(configuration("mock provider text is empty"));
                 }
                 ProviderConfig::OpenaiCompatible { model, secret, .. }
+                | ProviderConfig::Deepgram { model, secret, .. }
                     if model.trim().is_empty() || secret.trim().is_empty() =>
                 {
                     return Err(configuration(
-                        "OpenAI-compatible provider model and secret reference are required",
+                        "cloud provider model and secret reference are required",
                     ));
                 }
                 _ => {}
             }
             let timeout_seconds = match provider {
                 ProviderConfig::OpenaiCompatible {
+                    timeout_seconds, ..
+                }
+                | ProviderConfig::Deepgram {
                     timeout_seconds, ..
                 }
                 | ProviderConfig::Command {
@@ -247,6 +262,9 @@ impl Config {
             }
             if let ProviderConfig::OpenaiCompatible { endpoint, .. } = provider {
                 validate_endpoint(endpoint)?;
+            }
+            if let ProviderConfig::Deepgram { endpoint, .. } = provider {
+                validate_deepgram_endpoint(endpoint)?;
             }
             if let ProviderConfig::Command { program, .. } = provider
                 && program.trim().is_empty()
@@ -364,6 +382,20 @@ pub fn config_path() -> Result<PathBuf, VoxError> {
 /// Returns an authentication error if the secret does not exist or cannot be
 /// retrieved.
 pub fn lookup_secret(name: &str) -> Result<SecretString, VoxError> {
+    lookup_secret_text(name).and_then(SecretString::try_new)
+}
+
+/// Retrieves a Deepgram credential from Secret Service/KWallet.
+///
+/// # Errors
+///
+/// Returns an authentication error if the secret does not exist or cannot be
+/// retrieved.
+pub fn lookup_deepgram_secret(name: &str) -> Result<DeepgramSecretString, VoxError> {
+    lookup_secret_text(name).and_then(DeepgramSecretString::try_new)
+}
+
+fn lookup_secret_text(name: &str) -> Result<String, VoxError> {
     let output = Command::new("secret-tool")
         .args(["lookup", "application", "voxtype", "name", name])
         .output()
@@ -398,7 +430,7 @@ pub fn lookup_secret(name: &str) -> Result<SecretString, VoxError> {
             format!("secret {name} is empty"),
         ));
     }
-    Ok(SecretString::new(value))
+    Ok(value)
 }
 
 /// Checks whether a secret reference is available without loading its value
@@ -424,6 +456,7 @@ pub fn secret_state(name: &str) -> &'static str {
 ///
 /// Returns an I/O or service error when the secret cannot be stored.
 pub fn store_secret(name: &str, value: &[u8]) -> Result<(), VoxError> {
+    voxtype_provider_common::validate_secret_bytes(value)?;
     let mut child = Command::new("secret-tool")
         .args([
             "store",
@@ -462,6 +495,10 @@ fn default_language() -> String {
 
 const fn default_timeout() -> u64 {
     30
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 fn config_io(error: io::Error) -> VoxError {
@@ -598,6 +635,32 @@ mod tests {
             round_trip.providers["cloud"],
             ProviderConfig::OpenaiCompatible {
                 timeout_seconds: 45,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn round_trips_deepgram_provider_settings() {
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        config.providers.insert(
+            "deepgram".to_owned(),
+            ProviderConfig::Deepgram {
+                endpoint: "https://api.deepgram.com/v1/listen".to_owned(),
+                model: "nova-3".to_owned(),
+                secret: "deepgram-key".to_owned(),
+                timeout_seconds: 45,
+                smart_format: true,
+            },
+        );
+        let serialized = toml::to_string_pretty(&config).expect("configuration serializes");
+        let round_trip: Config = toml::from_str(&serialized).expect("configuration parses again");
+        round_trip.validate().expect("round trip validates");
+        assert!(matches!(
+            round_trip.providers["deepgram"],
+            ProviderConfig::Deepgram {
+                timeout_seconds: 45,
+                smart_format: true,
                 ..
             }
         ));

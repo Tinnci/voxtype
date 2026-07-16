@@ -1,61 +1,53 @@
-//! OpenAI-compatible batch transcription through the system `curl` transport.
+//! Deepgram prerecorded speech recognition through the system `curl` transport.
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use voxtype_core::{ErrorCategory, VoxError};
 pub use voxtype_provider_common::SecretString;
 use voxtype_provider_common::escape_curl_config;
 
 #[derive(Debug)]
-pub struct RestProviderConfig {
+pub struct DeepgramConfig {
     pub endpoint: String,
     pub model: String,
     pub api_key: SecretString,
     pub timeout_seconds: u64,
+    pub smart_format: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Transcription {
     pub text: String,
-    pub usage: ApiUsage,
 }
 
-/// Token counters explicitly reported by a provider response.
-///
-/// Missing fields remain `None`; `VoxType` does not estimate tokens from audio
-/// duration or transcript length.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ApiUsage {
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
-    pub total_tokens: Option<u64>,
-}
-
-/// Transcribes raw 16 kHz mono signed 16-bit PCM.
+/// Transcribes raw mono 16 kHz signed 16-bit PCM with Deepgram's official
+/// prerecorded API.
 ///
 /// # Errors
 ///
-/// Returns a normalized error if the WAV staging file, `curl` transport, HTTP
-/// service, or JSON response is invalid.
+/// Returns a normalized error if WAV staging, `curl`, the HTTP service, or the
+/// Deepgram response is invalid.
 pub fn transcribe_pcm(
-    config: &RestProviderConfig,
+    config: &DeepgramConfig,
     pcm_path: &Path,
     language: &str,
 ) -> Result<Transcription, VoxError> {
     validate_endpoint(&config.endpoint)?;
-    let wav_path = pcm_to_wav(pcm_path).map_err(io_error)?;
+    let wav_path =
+        voxtype_provider_common::pcm_to_wav(pcm_path, "deepgram.wav").map_err(io_error)?;
     let result = request(config, &wav_path, language);
     let _remove_result = fs::remove_file(wav_path);
     result
 }
 
 fn request(
-    config: &RestProviderConfig,
+    config: &DeepgramConfig,
     wav_path: &Path,
     language: &str,
 ) -> Result<Transcription, VoxError> {
+    let url = request_url(config, language);
     let mut command = Command::new("curl");
     command
         .args([
@@ -69,30 +61,25 @@ fn request(
             &config.timeout_seconds.to_string(),
             "--config",
             "-",
-            "--form",
-            &format!("file=@{};type=audio/wav", wav_path.display()),
-            "--form-string",
-            &format!("model={}", config.model),
-            "--form-string",
-            "response_format=json",
+            "--header",
+            "Content-Type: application/octet-stream",
+            "--data-binary",
+            &format!("@{}", wav_path.display()),
+            &url,
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if !language.is_empty() {
-        command.args(["--form-string", &format!("language={language}")]);
-    }
-    command.arg(&config.endpoint);
 
     let mut child = command.spawn().map_err(|error| {
         VoxError::new(
             ErrorCategory::Unavailable,
-            "provider.curl_unavailable",
+            "provider.deepgram.curl_unavailable",
             format!("could not start curl: {error}"),
         )
     })?;
     let config_input = format!(
-        "header = \"Authorization: Bearer {}\"\nheader = \"Accept: application/json\"\n",
+        "header = \"Authorization: Token {}\"\nheader = \"Accept: application/json\"\n",
         escape_curl_config(config.api_key.expose())
     );
     child
@@ -103,59 +90,79 @@ fn request(
         .map_err(io_error)?;
     let output = child.wait_with_output().map_err(io_error)?;
     if !output.status.success() {
-        let message = String::from_utf8_lossy(&output.stderr);
-        let message_text = sanitize_transport_error(&message);
-        let (category, retryable) = classify_http_failure(&message_text);
+        let message = sanitize_transport_error(&String::from_utf8_lossy(&output.stderr));
+        let (category, retryable) = classify_http_failure(&message);
         return Err(
-            VoxError::new(category, "provider.http_failed", message_text).with_retryable(retryable),
+            VoxError::new(category, "provider.deepgram.http_failed", message)
+                .with_retryable(retryable),
         );
     }
 
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+    parse_transcription(&output.stdout)
+}
+
+fn parse_transcription(response: &[u8]) -> Result<Transcription, VoxError> {
+    let value: serde_json::Value = serde_json::from_slice(response).map_err(|error| {
         VoxError::new(
             ErrorCategory::Protocol,
-            "provider.invalid_json",
-            format!("provider returned invalid JSON: {error}"),
+            "provider.deepgram.invalid_json",
+            format!("Deepgram returned invalid JSON: {error}"),
         )
     })?;
     let text = value
-        .get("text")
+        .pointer("/results/channels/0/alternatives/0/transcript")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .ok_or_else(|| {
             VoxError::new(
                 ErrorCategory::Protocol,
-                "provider.missing_text",
-                "provider response did not contain non-empty text",
+                "provider.deepgram.missing_transcript",
+                "Deepgram response did not contain a non-empty transcript",
             )
         })?;
     Ok(Transcription {
         text: text.to_owned(),
-        usage: parse_usage(&value),
     })
 }
 
-fn parse_usage(value: &serde_json::Value) -> ApiUsage {
-    let Some(usage) = value.get("usage").and_then(serde_json::Value::as_object) else {
-        return ApiUsage::default();
+fn request_url(config: &DeepgramConfig, language: &str) -> String {
+    let separator = if config.endpoint.contains('?') {
+        '&'
+    } else {
+        '?'
     };
-    ApiUsage {
-        input_tokens: first_u64(usage, &["input_tokens", "prompt_tokens"]),
-        output_tokens: first_u64(usage, &["output_tokens", "completion_tokens"]),
-        total_tokens: first_u64(usage, &["total_tokens"]),
+    let mut url = format!(
+        "{}{separator}model={}&smart_format={}",
+        config.endpoint,
+        encode_query(&config.model),
+        config.smart_format
+    );
+    if !language.is_empty() {
+        url.push_str("&language=");
+        url.push_str(&encode_query(language));
     }
+    url
 }
 
-fn first_u64(object: &serde_json::Map<String, serde_json::Value>, names: &[&str]) -> Option<u64> {
-    names
-        .iter()
-        .find_map(|name| object.get(*name).and_then(serde_json::Value::as_u64))
+fn encode_query(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    encoded
 }
 
 fn classify_http_failure(message: &str) -> (ErrorCategory, bool) {
     if message.contains("401") || message.contains("403") {
         (ErrorCategory::Authentication, false)
+    } else if message.contains("400") || message.contains("404") || message.contains("422") {
+        (ErrorCategory::Protocol, false)
     } else if message.contains("429") {
         (ErrorCategory::RateLimited, true)
     } else {
@@ -163,7 +170,7 @@ fn classify_http_failure(message: &str) -> (ErrorCategory, bool) {
     }
 }
 
-/// Validates that a provider endpoint uses HTTPS, except for loopback tests.
+/// Validates that an endpoint uses HTTPS, except for loopback integration tests.
 ///
 /// # Errors
 ///
@@ -171,19 +178,15 @@ fn classify_http_failure(message: &str) -> (ErrorCategory, bool) {
 pub fn validate_endpoint(endpoint: &str) -> Result<(), VoxError> {
     voxtype_provider_common::validate_endpoint(
         endpoint,
-        "provider endpoint must use HTTPS or loopback HTTP",
+        "Deepgram endpoint must use HTTPS or loopback HTTP",
     )
 }
 
-fn pcm_to_wav(pcm_path: &Path) -> io::Result<PathBuf> {
-    voxtype_provider_common::pcm_to_wav(pcm_path, "wav")
-}
-
 fn sanitize_transport_error(message: &str) -> String {
-    let first_line = message.lines().next().unwrap_or("HTTP request failed");
+    let first_line = message.lines().next().unwrap_or("Deepgram request failed");
     let truncated = first_line.chars().take(300).collect::<String>();
     if truncated.is_empty() {
-        "HTTP request failed".to_owned()
+        "Deepgram request failed".to_owned()
     } else {
         truncated
     }
@@ -192,66 +195,80 @@ fn sanitize_transport_error(message: &str) -> String {
 fn io_error(error: io::Error) -> VoxError {
     let message = error.to_string();
     drop(error);
-    VoxError::new(ErrorCategory::Internal, "provider.io_failed", message)
+    VoxError::new(
+        ErrorCategory::Internal,
+        "provider.deepgram.io_failed",
+        message,
+    )
 }
 
 fn internal(message: &'static str) -> VoxError {
-    VoxError::new(ErrorCategory::Internal, "provider.internal", message)
+    VoxError::new(
+        ErrorCategory::Internal,
+        "provider.deepgram.internal",
+        message,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn classifies_http_failures_for_routing() {
-        assert_eq!(
-            classify_http_failure("curl: server returned error: 401"),
-            (ErrorCategory::Authentication, false)
-        );
-        assert_eq!(
-            classify_http_failure("curl: server returned error: 429"),
-            (ErrorCategory::RateLimited, true)
-        );
-        assert_eq!(
-            classify_http_failure("curl: connection reset"),
-            (ErrorCategory::Unavailable, true)
-        );
-    }
     use std::io::Read;
     use std::net::TcpListener;
     use std::thread;
     use std::time::Duration;
 
     #[test]
-    fn writes_valid_wav_header() {
-        let directory =
-            std::env::temp_dir().join(format!("voxtype-rest-test-{}", std::process::id()));
-        fs::create_dir_all(&directory).expect("temporary directory");
-        let pcm = directory.join("sample.pcm");
-        fs::write(&pcm, vec![0_u8; 640]).expect("PCM fixture");
-        let wav = pcm_to_wav(&pcm).expect("WAV conversion");
-        let bytes = fs::read(&wav).expect("WAV fixture");
-        assert_eq!(&bytes[0..4], b"RIFF");
-        assert_eq!(&bytes[8..12], b"WAVE");
-        assert_eq!(&bytes[36..40], b"data");
-        assert_eq!(bytes.len(), 684);
-        let _result = fs::remove_dir_all(directory);
+    fn builds_encoded_request_url() {
+        let config = fixture_config("http://127.0.0.1:8080/v1/listen?detect_language=false");
+        assert_eq!(
+            request_url(&config, "zh-CN mixed"),
+            "http://127.0.0.1:8080/v1/listen?detect_language=false&model=nova-3&smart_format=true&language=zh-CN%20mixed"
+        );
     }
 
     #[test]
     fn rejects_plain_remote_http() {
-        assert!(validate_endpoint("http://example.com/asr").is_err());
-        assert!(validate_endpoint("http://127.0.0.1:8080/asr").is_ok());
-        assert!(validate_endpoint("http://localhost/asr").is_ok());
-        assert!(validate_endpoint("http://[::1]:8080/asr").is_ok());
-        assert!(validate_endpoint("http://127.0.0.1.example/asr").is_err());
+        assert!(validate_endpoint("http://api.deepgram.com/v1/listen").is_err());
+        assert!(validate_endpoint("https://api.deepgram.com/v1/listen").is_ok());
+        assert!(validate_endpoint("http://127.0.0.1:8080/v1/listen").is_ok());
     }
 
     #[test]
     fn redacts_secret_debug_output() {
         let secret = SecretString::new("sensitive".to_owned());
         assert_eq!(format!("{secret:?}"), "SecretString([redacted])");
+    }
+
+    #[test]
+    fn classifies_provider_failures() {
+        assert_eq!(
+            classify_http_failure("server returned 401"),
+            (ErrorCategory::Authentication, false)
+        );
+        assert_eq!(
+            classify_http_failure("server returned 422"),
+            (ErrorCategory::Protocol, false)
+        );
+        assert_eq!(
+            classify_http_failure("server returned 429"),
+            (ErrorCategory::RateLimited, true)
+        );
+        assert_eq!(
+            classify_http_failure("connection reset"),
+            (ErrorCategory::Unavailable, true)
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_or_empty_transcripts() {
+        assert!(parse_transcription(b"not-json").is_err());
+        assert!(
+            parse_transcription(
+                br#"{"results":{"channels":[{"alternatives":[{"transcript":"  "}]}]}}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -289,10 +306,11 @@ mod tests {
                 }
             }
             let request_text = String::from_utf8_lossy(&request);
-            assert!(request_text.contains("Authorization: Bearer test-key"));
-            assert!(request_text.contains("test-model"));
+            assert!(request_text.contains("Authorization: Token test-key"));
+            assert!(request_text.contains("model=nova-3"));
+            assert!(request_text.contains("language=zh"));
             assert!(request.windows(4).any(|window| window == b"RIFF"));
-            let body = br#"{"text":"loopback transcript","usage":{"prompt_tokens":11,"completion_tokens":4,"total_tokens":15}}"#;
+            let body = br#"{"results":{"channels":[{"alternatives":[{"transcript":"Deepgram transcript"}]}]}}"#;
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -303,53 +321,32 @@ mod tests {
         });
 
         let directory =
-            std::env::temp_dir().join(format!("voxtype-rest-loopback-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("voxtype-deepgram-test-{}", std::process::id()));
         fs::create_dir_all(&directory).expect("temporary directory");
         let pcm = directory.join("sample.pcm");
         fs::write(&pcm, vec![0_u8; 3_200]).expect("PCM fixture");
         let result = transcribe_pcm(
-            &RestProviderConfig {
-                endpoint: format!("http://{address}/v1/audio/transcriptions"),
-                model: "test-model".to_owned(),
-                api_key: SecretString::new("test-key".to_owned()),
-                timeout_seconds: 5,
+            &DeepgramConfig {
+                endpoint: format!("http://{address}/v1/listen"),
+                ..fixture_config("")
             },
             &pcm,
             "zh",
         )
         .expect("loopback transcription");
-        assert_eq!(result.text, "loopback transcript");
-        assert_eq!(
-            result.usage,
-            ApiUsage {
-                input_tokens: Some(11),
-                output_tokens: Some(4),
-                total_tokens: Some(15),
-            }
-        );
+        assert_eq!(result.text, "Deepgram transcript");
         server.join().expect("loopback server");
         let _result = fs::remove_dir_all(directory);
     }
 
-    #[test]
-    fn leaves_absent_usage_unknown() {
-        let value = serde_json::json!({"text": "hello"});
-        assert_eq!(parse_usage(&value), ApiUsage::default());
-    }
-
-    #[test]
-    fn accepts_openai_token_field_names() {
-        let value = serde_json::json!({
-            "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15}
-        });
-        assert_eq!(
-            parse_usage(&value),
-            ApiUsage {
-                input_tokens: Some(12),
-                output_tokens: Some(3),
-                total_tokens: Some(15),
-            }
-        );
+    fn fixture_config(endpoint: &str) -> DeepgramConfig {
+        DeepgramConfig {
+            endpoint: endpoint.to_owned(),
+            model: "nova-3".to_owned(),
+            api_key: SecretString::new("test-key".to_owned()),
+            timeout_seconds: 5,
+            smart_format: true,
+        }
     }
 
     fn complete_http_request(request: &[u8]) -> bool {
