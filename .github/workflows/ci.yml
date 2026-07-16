@@ -52,7 +52,22 @@ jobs:
           if [[ -z "$qmllint_bin" ]]; then
             qmllint_bin=/usr/lib/qt6/bin/qmllint
           fi
-          "$qmllint_bin" packaging/qml/Overlay.qml packaging/qml/Settings.qml
+          qmlformat_bin=$(command -v qmlformat || true)
+          if [[ -z "$qmlformat_bin" ]]; then
+            qmlformat_bin=/usr/lib/qt6/bin/qmlformat
+          fi
+          for file in packaging/qml/Overlay.qml packaging/qml/Settings.qml; do
+            "$qmlformat_bin" "$file" >/dev/null
+          done
+          qml_lint_output=$(
+            "$qmllint_bin" packaging/qml/Overlay.qml packaging/qml/Settings.qml 2>&1 || true
+          )
+          printf '%s\n' "$qml_lint_output"
+          if grep -Eq \
+            'Failed to import|was not found|not resolved|No type found|unknown grouped property|no matching signal found|Binding assigned.*no property' \
+            <<<"$qml_lint_output"; then
+            exit 1
+          fi
       - name: Build Fcitx5 addon with strict warnings
         run: |
           cmake -S fcitx5-addon -B build/fcitx5-addon -G Ninja -DCMAKE_BUILD_TYPE=Release
