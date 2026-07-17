@@ -11,6 +11,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build()?;
 
     eprintln!("voxtyped ready on {DBUS_NAME}");
+    let mut last_snapshot = None;
     loop {
         let interface = connection
             .object_server()
@@ -25,7 +26,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Err(error) = daemon.poll_recognition() {
             eprintln!("voxtyped recognition failed: {error}");
         }
+        let snapshot = daemon.state_snapshot();
         drop(daemon);
+        if last_snapshot.as_ref() != Some(&snapshot) {
+            if let Err(error) = zbus::block_on(VoxTypeDaemon::state_changed(
+                interface.signal_emitter(),
+                &snapshot.0,
+                &snapshot.1,
+            )) {
+                eprintln!("voxtyped state signal failed: {error}");
+            }
+            last_snapshot = Some(snapshot);
+        }
         drop(interface);
         thread::sleep(Duration::from_millis(100));
     }

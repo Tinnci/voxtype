@@ -220,6 +220,13 @@ impl VoxTypeDaemon {
             .map_or_else(String::new, ToString::to_string)
     }
 
+    #[zbus(signal)]
+    pub async fn state_changed(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        state: &str,
+        session: &str,
+    ) -> zbus::Result<()>;
+
     /// Returns a compact snapshot of configured provider health.
     fn provider_status(&self) -> String {
         let now = Instant::now();
@@ -537,6 +544,17 @@ impl VoxTypeDaemon {
     #[must_use]
     pub const fn should_quit_value(&self) -> bool {
         self.quit
+    }
+
+    #[must_use]
+    pub fn state_snapshot(&self) -> (String, String) {
+        (
+            self.machine.state().name().to_owned(),
+            self.machine
+                .state()
+                .session()
+                .map_or_else(String::new, ToString::to_string),
+        )
     }
 
     /// Stops a recording that exceeded the configured safety duration.

@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    Arc, RwLock,
+    mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel},
+};
 use std::thread;
 use std::time::Duration;
 use voxtype::client::Client;
@@ -364,9 +367,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         "org.kde.StatusNotifierWatcher",
     )?;
     watcher.call_method("RegisterStatusNotifierItem", &(TRAY_NAME))?;
+    let state_updates = spawn_state_listener()?;
     loop {
-        thread::sleep(Duration::from_millis(400));
-        let next = read_presentation();
+        let next = match state_updates.recv_timeout(Duration::from_secs(5)) {
+            Ok(state) => TrayPresentation::from_daemon_status(&state),
+            Err(RecvTimeoutError::Timeout) => read_presentation(),
+            Err(RecvTimeoutError::Disconnected) => {
+                TrayPresentation::from_daemon_status("unavailable")
+            }
+        };
         let previous = {
             let mut current = presentation
                 .write()
@@ -378,6 +387,51 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         emit_presentation_change(&connection, &presentation, &previous, &next)?;
     }
+}
+
+fn spawn_state_listener() -> std::io::Result<Receiver<String>> {
+    let (sender, receiver) = sync_channel(16);
+    thread::Builder::new()
+        .name("voxtype-tray-state-listener".to_owned())
+        .spawn(move || listen_for_daemon_states(&sender))?;
+    Ok(receiver)
+}
+
+fn listen_for_daemon_states(sender: &SyncSender<String>) {
+    loop {
+        match watch_daemon_once(sender) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(_) => {
+                if sender.send("unavailable".to_owned()).is_err() {
+                    return;
+                }
+            }
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn watch_daemon_once(sender: &SyncSender<String>) -> zbus::Result<bool> {
+    let connection = Connection::session()?;
+    let proxy = Proxy::new(
+        &connection,
+        voxtype::DBUS_NAME,
+        voxtype::DBUS_PATH,
+        voxtype::DBUS_INTERFACE,
+    )?;
+    let initial: String = proxy.call("Status", &())?;
+    if sender.send(initial).is_err() {
+        return Ok(false);
+    }
+    let mut signals = proxy.receive_signal("StateChanged")?;
+    for message in &mut signals {
+        let (state, _session): (String, String) = message.body().deserialize()?;
+        if sender.send(state).is_err() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn read_presentation() -> TrayPresentation {

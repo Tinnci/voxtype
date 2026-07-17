@@ -62,10 +62,10 @@ system integrations. Required work is event correctness:
 `copy` is the portable no-injection fallback and the only automatic fallback
 when Fcitx is unavailable. Clipboard plus `ydotool` remains an explicit unsafe
 compatibility choice and is not a daemon service dependency.
-The tray currently refreshes daemon state on a bounded interval, emits SNI
-icon/status changes, and updates dbusmenu action availability so Plasma cannot
-offer Start, Stop, and Cancel simultaneously. A daemon `StateChanged` signal
-will replace polling without changing the presentation policy.
+The daemon emits `StateChanged(state, session)` lifecycle events. The tray uses
+them for normal SNI icon/status and dbusmenu action updates, while a five-second
+status read remains only as disconnect/reconnect protection. Plasma therefore
+does not offer Start, Stop, and Cancel simultaneously.
 
 ## Layer 4: user experience, configuration, and diagnostics
 

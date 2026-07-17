@@ -296,6 +296,15 @@ ReloadConfiguration() -> ()
 InsertTest(s text) -> (s result)
 ```
 
+### Signals
+
+```text
+StateChanged(s state, s session_id)
+```
+
+`StateChanged` contains lifecycle metadata only and is emitted after every
+public state transition. It never contains transcript text or provider secrets.
+
 An empty profile selects `default_profile`; an empty session ID selects the
 currently active session. `UsageStatus` is JSON because the counters and soft
 quota fields are additive during version 0.x. Transcript history is memory-only,
@@ -308,8 +317,8 @@ failure is reflected by `Status`, while `Cancel` and status queries remain
 responsive. A worker result is applied only when its opaque session ID still
 matches the active finalizing session.
 
-The current API is request/response only. Transcript signals are intentionally
-absent until observer privacy and same-user access semantics are defined.
+Transcript and partial-result signals are intentionally absent until observer
+privacy and same-user access semantics are defined.
 
 ### Error names
 
