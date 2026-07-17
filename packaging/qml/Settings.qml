@@ -119,6 +119,23 @@ ApplicationWindow {
         return (Number(millis) / 1000).toFixed(1) + " s"
     }
 
+    function quotaAlert(provider) {
+        const usage = provider.usage
+        const quota = provider.quota
+        let highest = 0
+        if (quota.request_limit !== null)
+            highest = Math.max(highest, Number(usage.requests) / Number(quota.request_limit))
+        if (quota.audio_seconds_limit !== null)
+            highest = Math.max(highest, Number(usage.audio_millis) / 1000 / Number(quota.audio_seconds_limit))
+        if (quota.token_limit !== null && Number(usage.token_reports) > 0)
+            highest = Math.max(highest, Number(usage.reported_tokens) / Number(quota.token_limit))
+        if (highest >= 1)
+            return qsTr("本次 daemon 会话已达到配置的软限额")
+        if (highest >= 0.8)
+            return qsTr("本次 daemon 会话已接近配置的软限额")
+        return ""
+    }
+
     Component.onCompleted: refresh("")
 
     component SummaryCard: Frame {
@@ -824,6 +841,13 @@ ApplicationWindow {
                                             : qsTr("API Token 未报告")
                                     }
                                     Item { Layout.fillWidth: true }
+                                }
+                                Label {
+                                    visible: root.quotaAlert(modelData).length > 0
+                                    text: root.quotaAlert(modelData)
+                                    color: text.indexOf(qsTr("达到")) >= 0 ? "#ef4444" : "#f59e0b"
+                                    wrapMode: Text.Wrap
+                                    Layout.fillWidth: true
                                 }
 
                                 GridLayout {
