@@ -1,6 +1,7 @@
 //! Linux desktop integration and daemon orchestration for `VoxType`.
 
 pub mod audio;
+pub mod calibration;
 pub mod client;
 pub mod config;
 pub mod daemon;

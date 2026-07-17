@@ -23,6 +23,7 @@ Window {
         : stateName === "error" ? "#dc2626"
         : stateName === "no-speech" ? "#64748b"
         : stateName === "cancelled" ? "#64748b"
+        : stateName === "calibration" ? "#8b5cf6"
         : stateName === "grammar" ? "#8b5cf6"
         : "#22c55e"
     readonly property string stateIcon: stateName === "listening" ? "●"
@@ -30,7 +31,8 @@ Window {
         : stateName === "done" ? "✓"
         : stateName === "grammar" ? "Aa"
         : stateName === "no-speech" ? "∿"
-        : stateName === "cancelled" ? "×" : "!"
+        : stateName === "cancelled" ? "×"
+        : stateName === "calibration" ? "◉" : "!"
 
     width: 400
     height: detail.length > 0 ? 112 : 82

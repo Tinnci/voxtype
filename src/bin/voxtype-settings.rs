@@ -10,13 +10,13 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 use voxtype::audio::Recording;
+use voxtype::calibration;
 use voxtype::client::Client;
 use voxtype::config::{
     Config, InsertionBackend, ProfileConfig, ProviderConfig, ProviderQuotaConfig, ReplaySetting,
     config_path, secret_state, store_secret,
 };
 use voxtype::qml;
-use voxtype::vad::{self, VadConfig};
 use voxtype_core::ProviderId;
 use zbus::blocking::Connection;
 
@@ -178,40 +178,100 @@ fn route(request: &Request<'_>) -> io::Result<Response> {
 }
 
 fn calibrate_microphone() -> io::Result<Response> {
+    let result = calibrate_microphone_inner();
+    if result.is_err() {
+        calibration_phase(
+            "Microphone calibration failed",
+            "Check the selected device and try again",
+            3_000,
+        );
+    }
+    result
+}
+
+fn calibrate_microphone_inner() -> io::Result<Response> {
+    const SILENCE_MILLIS: u64 = 1_500;
+    const SPEECH_MILLIS: u64 = 3_000;
     let config = Config::load_or_create().map_err(domain_io)?;
-    let recording = Recording::start_with_device(Some(config.audio.device.as_str()))?;
-    thread::sleep(Duration::from_millis(2_500));
-    let recording = recording.stop()?;
-    let result = vad::analyze_file(
-        &recording.path,
-        VadConfig {
-            rms_threshold: config.audio.vad_rms_threshold,
-            minimum_voiced_frames: config.audio.vad_minimum_voiced_frames,
-        },
+    calibration_phase(
+        "Microphone calibration",
+        "Stay quiet while VoxType measures room noise",
+        0,
     );
+    let recording = Recording::start_with_device(Some(config.audio.device.as_str()))?;
+    thread::sleep(Duration::from_millis(SILENCE_MILLIS));
+    calibration_phase(
+        "Microphone calibration",
+        "Speak a normal sentence until the recording finishes",
+        0,
+    );
+    thread::sleep(Duration::from_millis(SPEECH_MILLIS));
+    let recording_path = recording.path().to_owned();
+    let recording = match recording.stop() {
+        Ok(recording) => recording,
+        Err(error) => {
+            let _ = fs::remove_file(recording_path);
+            return Err(error);
+        }
+    };
+    let pcm = fs::read(&recording.path);
     let _ = fs::remove_file(&recording.path);
-    let result = result?;
-    let level_status = microphone_level_status(result.peak);
-    Ok(Response::json(&json!({
-        "noise_floor": result.noise_floor,
-        "average_rms": result.average_rms,
-        "peak": result.peak,
-        "adaptive_threshold": result.adaptive_threshold,
-        "suggested_threshold": result.noise_floor.saturating_mul(2).saturating_add(80),
-        "level_status": level_status,
-        "speech_ratio": if result.total_frames == 0 { 0.0 } else {
-            f64::from(result.voiced_frames) / f64::from(result.total_frames)
+    let pcm = pcm?;
+    let silence_bytes = usize::try_from(SILENCE_MILLIS.saturating_mul(32))
+        .unwrap_or(usize::MAX)
+        .min(pcm.len());
+    let result = calibration::analyze(&pcm[..silence_bytes], &pcm[silence_bytes..])
+        .map_err(io::Error::other)?;
+    calibration_phase(
+        "Microphone calibration complete",
+        if result.can_apply {
+            "The suggested threshold is ready for review"
+        } else {
+            "The sample was not reliable enough to change the threshold"
         },
+        3_000,
+    );
+    Ok(Response::json(&json!({
+        "capture_backend": recording.backend,
+        "configured_device": if config.audio.device.is_empty() { "default" } else { config.audio.device.as_str() },
+        "noise_floor": result.noise_p50,
+        "noise_p20": result.noise_p20,
+        "noise_p50": result.noise_p50,
+        "noise_p95": result.noise_p95,
+        "average_rms": result.speech_p50,
+        "speech_p50": result.speech_p50,
+        "speech_p95": result.speech_p95,
+        "peak": result.peak,
+        "adaptive_threshold": result.suggested_threshold,
+        "suggested_threshold": result.suggested_threshold,
+        "snr_db": result.snr_db,
+        "clipping_ratio": result.clipping_ratio,
+        "speech_ratio": result.speech_ratio,
+        "confidence": result.confidence.as_str(),
+        "reason": result.reason.as_str(),
+        "can_apply": result.can_apply,
     })))
 }
 
-const fn microphone_level_status(peak: u16) -> &'static str {
-    if peak >= 32_000 {
-        "clipping"
-    } else if peak < 500 {
-        "too-quiet"
-    } else {
-        "ok"
+fn calibration_phase(title: &str, body: &str, timeout_millis: u32) {
+    let payload = json!({
+        "state": "calibration",
+        "title": title,
+        "body": body,
+        "timeout_ms": timeout_millis,
+    })
+    .to_string();
+    let Ok(mut child) = Command::new("voxtype-overlay")
+        .arg("show")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(payload.as_bytes());
     }
 }
 
@@ -859,13 +919,6 @@ text = "demo"
             config.providers["work-asr"],
             ProviderConfig::Deepgram { .. }
         ));
-    }
-
-    #[test]
-    fn classifies_microphone_peak_levels() {
-        assert_eq!(microphone_level_status(100), "too-quiet");
-        assert_eq!(microphone_level_status(2_000), "ok");
-        assert_eq!(microphone_level_status(32_000), "clipping");
     }
 
     #[test]

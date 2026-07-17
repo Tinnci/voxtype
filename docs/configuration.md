@@ -54,11 +54,12 @@ ending an utterance.
 When speech is found, cloud and command providers receive a trimmed recording
 with 160 ms of pre-roll and 300 ms of post-roll. This preserves fast consonant
 onsets and natural endings while avoiding needless silence upload. The settings
-panel can record a 2.5-second local calibration sample and show the noise floor,
-dynamic threshold, peak, and speech ratio. `voxtype doctor audio` reports the
-same metrics plus RMS, clipping state, and a suggested threshold. Calibration
-audio is never uploaded and is deleted immediately after analysis; suggested
-values are only applied after explicit confirmation.
+panel records an explicit 1.5-second quiet phase followed by a 3-second speaking
+phase. It reports noise P20/P50/P95, speech P50/P95, SNR, clipped-sample ratio,
+speech ratio, confidence, and a suggested threshold. Low-confidence samples
+cannot be applied. `voxtype doctor audio` retains its short single-sample
+diagnostic path. Calibration audio is never uploaded and is deleted immediately
+after analysis; suggested values are applied only after explicit confirmation.
 
 ## Test profile
 

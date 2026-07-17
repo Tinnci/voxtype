@@ -90,10 +90,12 @@ grammar model. It should be named and presented accurately; a future grammar
 backend may use LanguageTool or another explicitly configured local/online
 service without putting that dependency in the core daemon.
 
-Audio calibration and `doctor audio` now report RMS, peak/clipping state, noise
-floor, adaptive threshold, speech ratio, and a suggested threshold instead of
-treating non-empty bytes as success. Device identity, startup latency, SNR,
-and captured/dropped frame counters remain the next capture-adapter increment.
+Audio calibration now separates quiet and speaking phases and reports noise
+distribution, speech distribution, SNR, clipped-sample ratio, speech ratio,
+confidence, and a suggested threshold. Low-confidence results cannot be
+applied. `doctor audio` remains a shorter capture-path diagnostic. Device
+identity, startup latency, and captured/dropped frame counters remain the next
+capture-adapter increment.
 Session-local usage and soft quotas are not provider billing balances and must
 remain labelled as such.
 
@@ -179,10 +181,10 @@ doubles at protocol and process boundaries so failure behavior remains testable.
 - Treat request/audio/token counters as daemon-session telemetry and configured
   limits as local soft limits. Provider account balance or billing quota may be
   shown only when fetched from an authoritative provider API with provenance.
-- Replace calibration's single mixed sample with guided silence and speech
-  phases that calculate noise distributions, speech RMS, SNR, clipped-sample
-  ratio, threshold confidence, and device identity. Low-confidence results must
-  not enable one-click application.
+- Calibration now uses guided silence and speech phases with noise/speech
+  distributions, SNR, clipped-sample ratio, threshold confidence, and guarded
+  application. Device identity and hot-plug evidence remain capture-adapter
+  work rather than calibration heuristics.
 - Replace KGlobalAccel launcher pairs with a press/release-capable portal or KDE
   adapter for true push-to-talk. Separate Start/Stop actions remain useful but
   are not push-to-talk.

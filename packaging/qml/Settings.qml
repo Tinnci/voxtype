@@ -457,7 +457,7 @@ ApplicationWindow {
                             anchors.fill: parent
                             Label {
                                 Layout.fillWidth: true
-                                text: qsTr("录制 2.5 秒本地样本，估算环境噪声和动态阈值。样本不会上传，分析后立即删除。开始时先保持安静，再说一句短句。")
+                                text: qsTr("校准分为两个明确阶段：先静音 1.5 秒测量房间噪声，再用正常音量朗读 3 秒。阶段提示会显示在悬浮窗中；样本不会上传，分析后立即删除。")
                                 wrapMode: Text.Wrap
                                 opacity: 0.75
                             }
@@ -468,41 +468,59 @@ ApplicationWindow {
                                     enabled: !root.calibrating
                                     onClicked: {
                                         root.calibrating = true
-                                        root.message = qsTr("正在录制校准样本…")
+                                        root.calibration = null
+                                        root.message = qsTr("校准开始：请先保持安静，看到提示后再朗读")
                                         root.callApi("POST", "/calibrate", "", function(result) {
                                             root.calibration = result
                                             root.calibrating = false
                                             root.messageError = false
-                                            root.message = qsTr("校准完成；请确认建议值后再保存")
+                                            root.message = result.can_apply
+                                                ? qsTr("校准完成；建议阈值可信，可确认后保存")
+                                                : qsTr("校准置信度不足；请按提示重新校准")
                                         })
                                     }
                                 }
                                 Label {
                                     Layout.fillWidth: true
                                     visible: root.calibration !== null
-                                    text: root.calibration ? qsTr("噪声 %1 · 动态阈值 %2 · 峰值 %3 · 语音占比 %4%")
-                                        .arg(root.calibration.noise_floor)
-                                        .arg(root.calibration.adaptive_threshold)
-                                        .arg(root.calibration.peak)
-                                        .arg(Math.round(root.calibration.speech_ratio * 100)) : ""
+                                    text: root.calibration ? qsTr("%1 (%2) · 噪声 P50 %3 / P95 %4 · 语音 P50 %5 · SNR %6 dB · 削波 %7%")
+                                        .arg(root.calibration.configured_device)
+                                        .arg(root.calibration.capture_backend)
+                                        .arg(root.calibration.noise_p50)
+                                        .arg(root.calibration.noise_p95)
+                                        .arg(root.calibration.speech_p50)
+                                        .arg(Number(root.calibration.snr_db).toFixed(1))
+                                        .arg((Number(root.calibration.clipping_ratio) * 100).toFixed(2)) : ""
                                     elide: Text.ElideRight
                                 }
                                 Button {
                                     visible: root.calibration !== null
+                                    enabled: root.calibration && root.calibration.can_apply
                                     text: qsTr("采用建议阈值")
                                     onClicked: vadThreshold.value = root.calibration.suggested_threshold
+                                    ToolTip.visible: hovered && !enabled
+                                    ToolTip.text: qsTr("低置信校准结果不能直接应用")
                                 }
                             }
                             Label {
                                 Layout.fillWidth: true
                                 visible: root.calibration !== null
                                 text: !root.calibration ? ""
-                                    : root.calibration.level_status === "clipping"
+                                    : root.calibration.reason === "clipping"
                                         ? qsTr("检测到削波：请降低麦克风增益或稍微远离麦克风")
-                                        : root.calibration.level_status === "too-quiet"
-                                            ? qsTr("输入过低：请检查设备、增益或靠近麦克风")
-                                            : qsTr("输入电平正常")
-                                color: root.calibration && root.calibration.level_status === "ok"
+                                        : root.calibration.reason === "no-speech"
+                                            ? qsTr("朗读阶段没有检测到明确语音；请确认阶段提示后重试")
+                                            : root.calibration.reason === "too-quiet"
+                                                ? qsTr("语音输入过低：请检查设备、增益或靠近麦克风")
+                                                : root.calibration.reason === "unstable-noise"
+                                                    ? qsTr("静音阶段噪声波动过大：请减少键盘声或环境突发噪声后重试")
+                                                    : root.calibration.reason === "marginal-snr"
+                                                        ? qsTr("信噪比较低；建议改善距离或环境后重新校准")
+                                                        : qsTr("校准可信度：%1 · 建议阈值 %2 · 语音占比 %3%")
+                                                            .arg(root.calibration.confidence)
+                                                            .arg(root.calibration.suggested_threshold)
+                                                            .arg(Math.round(root.calibration.speech_ratio * 100))
+                                color: root.calibration && root.calibration.can_apply
                                     ? "#22c55e" : "#ef4444"
                                 wrapMode: Text.Wrap
                             }
