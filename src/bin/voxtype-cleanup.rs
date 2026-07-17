@@ -41,6 +41,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let path = write_private_report(report.as_bytes())?;
     let cleanup = ReportCleanup(path.clone());
     let status = Command::new(qml::runtime())
+        .env("QML_XHR_ALLOW_FILE_READ", "1")
         .arg(qml_path())
         .arg("--")
         .arg(&path)

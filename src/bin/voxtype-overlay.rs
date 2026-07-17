@@ -171,6 +171,7 @@ fn ensure_running() -> Result<(), Box<dyn Error>> {
     let qml = qml_path();
     let state = state_path()?;
     let child = Command::new(qml::runtime())
+        .env("QML_XHR_ALLOW_FILE_READ", "1")
         .arg(qml)
         .arg("--")
         .arg(state)
