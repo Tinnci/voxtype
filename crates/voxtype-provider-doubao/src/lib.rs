@@ -8,9 +8,76 @@
 use serde_json::Value;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use voxtype_provider_common::SecretString;
 
 pub const PCM_FRAME_BYTES: usize = 640;
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_BOOTSTRAP_RESPONSE_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct DeviceIdentity {
+    pub client_udid: String,
+    pub open_udid: String,
+    pub cdid: String,
+}
+
+impl fmt::Debug for DeviceIdentity {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceIdentity")
+            .field("client_udid", &"[redacted]")
+            .field("open_udid", &"[redacted]")
+            .field("cdid", &"[redacted]")
+            .finish()
+    }
+}
+
+impl DeviceIdentity {
+    /// Validates caller-generated persistent identifiers without prescribing a
+    /// proprietary generation algorithm.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for empty, oversized, or control-character values.
+    pub fn validate(&self) -> Result<(), BootstrapError> {
+        for value in [&self.client_udid, &self.open_udid, &self.cdid] {
+            if value.is_empty()
+                || value.len() > 128
+                || value.bytes().any(|byte| byte.is_ascii_control())
+            {
+                return Err(BootstrapError("invalid persistent device identifier"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct RegisteredDevice {
+    pub device_id: String,
+    pub install_id: String,
+}
+
+impl fmt::Debug for RegisteredDevice {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RegisteredDevice")
+            .field("device_id", &"[redacted]")
+            .field("install_id", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BootstrapError(&'static str);
+
+impl Display for BootstrapError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl Error for BootstrapError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -52,6 +119,72 @@ impl Display for ProtocolError {
 }
 
 impl Error for ProtocolError {}
+
+/// Computes the observed uppercase MD5 compatibility header for the exact
+/// settings request body. This is not treated as authentication.
+#[must_use]
+pub fn x_ss_stub(body: &[u8]) -> String {
+    format!("{:X}", md5::compute(body))
+}
+
+/// Parses successful device registration identifiers from a bounded JSON
+/// response. Numeric and string IDs are accepted for compatibility.
+///
+/// # Errors
+///
+/// Returns an error for oversized/malformed JSON or absent/non-positive IDs.
+pub fn parse_device_registration(body: &[u8]) -> Result<RegisteredDevice, BootstrapError> {
+    let value = parse_bootstrap_json(body)?;
+    let device_id = identifier_at(&value, &["device_id"])
+        .or_else(|| identifier_at(&value, &["data", "device_id"]))
+        .ok_or(BootstrapError(
+            "registration response has no positive device_id",
+        ))?;
+    let install_id = identifier_at(&value, &["install_id"])
+        .or_else(|| identifier_at(&value, &["data", "install_id"]))
+        .unwrap_or_default();
+    Ok(RegisteredDevice {
+        device_id,
+        install_id,
+    })
+}
+
+/// Extracts the ASR token from the observed settings response path and stores
+/// it in the workspace's zeroizing secret type.
+///
+/// # Errors
+///
+/// Returns an error for oversized/malformed JSON, a missing token, or invalid
+/// secret bytes.
+pub fn parse_settings_token(body: &[u8]) -> Result<SecretString, BootstrapError> {
+    let value = parse_bootstrap_json(body)?;
+    let token = value
+        .pointer("/data/settings/asr_config/app_key")
+        .and_then(Value::as_str)
+        .ok_or(BootstrapError("settings response has no ASR app_key"))?;
+    SecretString::try_new(token.to_owned())
+        .map_err(|_| BootstrapError("settings ASR app_key is invalid"))
+}
+
+fn parse_bootstrap_json(body: &[u8]) -> Result<Value, BootstrapError> {
+    if body.len() > MAX_BOOTSTRAP_RESPONSE_BYTES {
+        return Err(BootstrapError("Doubao bootstrap response is too large"));
+    }
+    serde_json::from_slice(body).map_err(|_| BootstrapError("invalid Doubao bootstrap JSON"))
+}
+
+fn identifier_at(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    let identifier = match current {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        _ => return None,
+    };
+    (!identifier.is_empty() && identifier != "0").then_some(identifier)
+}
 
 /// Encodes the observed request envelope without depending on generated
 /// protobuf code. Empty JSON/audio fields are omitted.
@@ -304,6 +437,48 @@ fn advance(message: &[u8], cursor: &mut usize, count: usize) -> Result<(), Proto
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_parses_ids_and_zeroizing_token() {
+        let registered =
+            parse_device_registration(br#"{"data":{"device_id":123456,"install_id":"654321"}}"#)
+                .expect("registered device");
+        assert_eq!(registered.device_id, "123456");
+        assert_eq!(registered.install_id, "654321");
+        assert!(!format!("{registered:?}").contains("123456"));
+
+        let token = parse_settings_token(
+            br#"{"data":{"settings":{"asr_config":{"app_key":"secret-token"}}}}"#,
+        )
+        .expect("settings token");
+        assert_eq!(token.expose(), "secret-token");
+        assert_eq!(format!("{token:?}"), "SecretString([redacted])");
+    }
+
+    #[test]
+    fn bootstrap_rejects_missing_ids_tokens_and_control_bytes() {
+        assert!(parse_device_registration(br#"{"device_id":0}"#).is_err());
+        assert!(parse_settings_token(br#"{"data":{}}"#).is_err());
+        assert!(
+            parse_settings_token(
+                b"{\"data\":{\"settings\":{\"asr_config\":{\"app_key\":\"bad\\nkey\"}}}}"
+            )
+            .is_err()
+        );
+        let identity = DeviceIdentity {
+            client_udid: "client".to_owned(),
+            open_udid: "bad\nvalue".to_owned(),
+            cdid: "cdid".to_owned(),
+        };
+        assert!(identity.validate().is_err());
+        assert!(!format!("{identity:?}").contains("\"client\""));
+    }
+
+    #[test]
+    fn settings_stub_is_uppercase_md5_of_exact_body() {
+        assert_eq!(x_ss_stub(b"body=null"), "46C03B52742B3F2615A3ABDF1636B754");
+        assert_ne!(x_ss_stub(b"body=null"), x_ss_stub(b"body=null\n"));
+    }
 
     #[test]
     fn request_envelope_matches_independent_golden_bytes() {

@@ -6,7 +6,9 @@ rust-version = "1.85"
 publish = false
 
 [dependencies]
+md5 = "0.8.0"
 serde_json = "1.0.145"
+voxtype-provider-common = { path = "../voxtype-provider-common" }
 
 [lints]
 workspace = true

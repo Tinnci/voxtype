@@ -7,9 +7,11 @@ stateful VAD, cancellable background provider work, and desktop integration are
 implemented.
 The unofficial Doubao Provider is now active work. A dependency-light,
 clean-room protocol crate implements the bounded protobuf envelope, exact 20 ms
-PCM framing, and final/VAD event interpretation. Device identity, token
-bootstrap, WebSocket/TLS, and Opus remain gated by the distribution/licensing
-decision and live opt-in verification.
+PCM framing, final/VAD event interpretation, bounded bootstrap response parsing,
+redacted persistent IDs, zeroizing tokens, and the exact settings-body MD5
+compatibility field. Endpoint/client-identity templates, WebSocket/TLS, and
+Opus remain gated by the distribution/licensing decision and live opt-in
+verification.
 
 ## Phase 0: decisions and spikes
 

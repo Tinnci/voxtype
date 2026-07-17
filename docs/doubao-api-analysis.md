@@ -15,8 +15,11 @@ The first clean-room implementation increment now lives in
 `crates/voxtype-provider-doubao`. It contains only independently documented
 wire behavior: bounded protobuf envelope encoding/decoding, unknown-field
 skipping, 20 ms PCM frame reassembly/padding, and VAD/interim/final result JSON
-interpretation. It deliberately contains no endpoint, Android identity,
-credential bootstrap, WebSocket, TLS, or Opus implementation yet.
+interpretation. The next increment adds caller-supplied persistent identifier
+validation, redacted registration IDs, bounded registration/settings response
+parsing, zeroizing `app_key` storage, and exact uppercase `x-ss-stub` MD5.
+It deliberately contains no endpoint, Android identity template, WebSocket,
+TLS, or Opus implementation yet.
 
 ## Observed service flow
 
