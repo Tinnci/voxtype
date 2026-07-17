@@ -12,8 +12,9 @@ use crate::{
     vad::{self, VadConfig, VadResult},
 };
 use std::collections::VecDeque;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
@@ -22,7 +23,7 @@ use std::sync::{
     mpsc::{Receiver, TryRecvError, sync_channel},
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use voxtype_core::{
     AudioAcceptance, Command, CommandEffect, ErrorCategory, FallbackReason, ProviderAttemptFailure,
     ReplayPolicy, SessionId, SessionMachine, StartRequest, TriggerMode, VoxError,
@@ -1640,20 +1641,46 @@ fn overlay_audio_metrics(analysis: vad::VadFrameAnalysis, clipping_percent: u32)
         "adaptive_threshold": analysis.adaptive_threshold,
         "speech_active": analysis.speech_active,
         "clipping_percent": clipping_percent.min(100),
+        "updated_ms": now_millis(),
     })
     .to_string();
-    let Ok(mut child) = ProcessCommand::new("voxtype-overlay")
-        .args(["show"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    else {
-        return;
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(payload.as_bytes());
+    let _ = write_overlay_telemetry(payload.as_bytes());
+}
+
+fn write_overlay_telemetry(payload: &[u8]) -> io::Result<()> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is unavailable"))?;
+    let directory = runtime.join("voxtype");
+    fs::create_dir_all(&directory)?;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    let path = directory.join("overlay-state.json");
+    let temporary = directory.join(format!(
+        "overlay-state.telemetry-{}.tmp",
+        std::process::id()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    let result = file
+        .write_all(payload)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::rename(&temporary, path));
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
     }
+    result
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

@@ -168,11 +168,13 @@ doubles at protocol and process boundaries so failure behavior remains testable.
   plus a review/apply/undo flow. Cleanup must return Unicode-safe span edits;
   repeated-word and capitalization rules require explicit acceptance.
 - The overlay is now a persistent QML process backed by a 0600 runtime state
-  file. Daemon updates arrive through bounded stdin JSON and the QML view
-  refreshes in place; state text is no longer placed in a process argv. The
-  listening view now renders RMS/threshold/speech-active telemetry and keeps
-  processing progress explicitly indeterminate. Ordered provider stages are
-  still needed for a truthful upload/fallback progress indicator.
+  file. State transitions use bounded stdin JSON, while high-rate audio
+  telemetry uses the same directory's 0600 atomic state replacement so the
+  daemon does not spawn a process for every frame. State text is no longer
+  placed in a process argv. The listening view now renders RMS/threshold/
+  speech-active telemetry and keeps processing progress explicitly
+  indeterminate. Ordered provider stages are still needed for a truthful
+  upload/fallback progress indicator.
 - Treat request/audio/token counters as daemon-session telemetry and configured
   limits as local soft limits. Provider account balance or billing quota may be
   shown only when fetched from an authoritative provider API with provenance.
