@@ -33,6 +33,12 @@ mode using copy plus authorized synthetic paste), and `copy` (clipboard only,
 with no keyboard injection). Copy-only mode is the safest portable fallback
 when an application does not expose a usable input-method context.
 
+Clipboard restoration is conditional: VoxType restores previous text only if
+the clipboard still contains the exact dictation payload. A new user copy is
+never overwritten. When restoration is enabled and the existing clipboard is
+non-text data, the unsafe paste operation is refused because `wl-copy` cannot
+round-trip arbitrary MIME offers safely.
+
 ## Voice activity detection and trimming
 
 The local VAD analyzes 20 ms PCM frames without an external DSP library. Its

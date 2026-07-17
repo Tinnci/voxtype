@@ -17,6 +17,13 @@ pub struct ClipboardInserter {
     restore_clipboard: bool,
 }
 
+#[derive(Debug)]
+enum ClipboardSnapshot {
+    Empty,
+    Text(Vec<u8>),
+    Unsupported,
+}
+
 impl Default for ClipboardInserter {
     fn default() -> Self {
         Self {
@@ -46,18 +53,27 @@ impl ClipboardInserter {
             ));
         }
 
-        let previous = read_clipboard();
+        let previous = if self.restore_clipboard {
+            let snapshot = read_clipboard_snapshot()?;
+            if matches!(snapshot, ClipboardSnapshot::Unsupported) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "clipboard contains non-text data that VoxType cannot restore safely",
+                ));
+            }
+            Some(snapshot)
+        } else {
+            None
+        };
         write_clipboard(text.as_bytes())?;
         send_paste_chord()?;
         thread::sleep(self.restore_delay);
 
-        let clipboard_restored = if self.restore_clipboard {
+        let clipboard_restored = if self.restore_clipboard && clipboard_matches(text.as_bytes()) {
             match previous {
-                Some(contents) => write_clipboard(&contents).is_ok(),
-                None => Command::new("wl-copy")
-                    .arg("--clear")
-                    .status()
-                    .is_ok_and(|status| status.success()),
+                Some(ClipboardSnapshot::Text(contents)) => write_clipboard(&contents).is_ok(),
+                Some(ClipboardSnapshot::Empty) => clear_clipboard(),
+                Some(ClipboardSnapshot::Unsupported) | None => false,
             }
         } else {
             false
@@ -96,6 +112,38 @@ fn read_clipboard() -> Option<Vec<u8>> {
         .ok()
         .filter(|output| output.status.success())
         .map(|output| output.stdout)
+}
+
+fn read_clipboard_snapshot() -> io::Result<ClipboardSnapshot> {
+    let text = Command::new("wl-paste")
+        .args(["--no-newline", "--type", "text"])
+        .output()?;
+    if text.status.success() {
+        return Ok(ClipboardSnapshot::Text(text.stdout));
+    }
+
+    let types = Command::new("wl-paste").arg("--list-types").output()?;
+    if types.status.success() && !types.stdout.is_empty() {
+        Ok(ClipboardSnapshot::Unsupported)
+    } else {
+        Ok(ClipboardSnapshot::Empty)
+    }
+}
+
+fn clipboard_matches(expected: &[u8]) -> bool {
+    let current = read_clipboard();
+    clipboard_contents_match(current.as_deref(), expected)
+}
+
+fn clipboard_contents_match(current: Option<&[u8]>, expected: &[u8]) -> bool {
+    current.is_some_and(|current| current == expected)
+}
+
+fn clear_clipboard() -> bool {
+    Command::new("wl-copy")
+        .arg("--clear")
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn write_clipboard(contents: &[u8]) -> io::Result<()> {
@@ -137,5 +185,12 @@ mod tests {
     #[test]
     fn default_restore_delay_allows_paste_consumer_to_read() {
         assert!(ClipboardInserter::default().restore_delay >= Duration::from_millis(100));
+    }
+
+    #[test]
+    fn restore_requires_voxtype_to_still_own_clipboard() {
+        assert!(clipboard_contents_match(Some(b"dictation"), b"dictation"));
+        assert!(!clipboard_contents_match(Some(b"user copy"), b"dictation"));
+        assert!(!clipboard_contents_match(None, b"dictation"));
     }
 }

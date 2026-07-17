@@ -314,6 +314,12 @@ ApplicationWindow {
                                 text: qsTr("使用剪贴板回退后恢复原内容")
                                 checked: root.state ? root.state.general.restore_clipboard : true
                             }
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("仅恢复可安全读取的文本；如果期间复制了新内容则保留新内容，非文本剪贴板不会被覆盖。")
+                                wrapMode: Text.Wrap
+                                opacity: 0.65
+                            }
                             CheckBox {
                                 id: retainRecordings
                                 text: qsTr("保留录音文件（仅建议调试时启用）")
