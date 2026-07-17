@@ -13,7 +13,7 @@ use crate::{
 };
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
@@ -1530,9 +1530,25 @@ fn profile_is_demo_only(config: &Config, profile: &ProfileConfig) -> bool {
 }
 
 fn overlay(state: &str, title: &str, body: &str, timeout_millis: u32) {
-    let _ = ProcessCommand::new("voxtype-overlay")
-        .args(["show", state, title, body, &timeout_millis.to_string()])
-        .spawn();
+    let payload = serde_json::json!({
+        "state": state,
+        "title": title,
+        "body": body,
+        "timeout_ms": timeout_millis,
+    })
+    .to_string();
+    let Ok(mut child) = ProcessCommand::new("voxtype-overlay")
+        .args(["show"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(payload.as_bytes());
+    }
 }
 
 #[cfg(test)]

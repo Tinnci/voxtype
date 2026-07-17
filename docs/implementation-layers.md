@@ -135,9 +135,11 @@ doubles at protocol and process boundaries so failure behavior remains testable.
 - Present `grammar.rs` as local typography/text cleanup. A feature called full
 semantic grammar checking needs a separate pluggable local or online checker plus a
   review/apply/undo flow; heuristics must not be labelled as semantic grammar.
-- Replace the one-shot overlay snapshot with a persistent, event-driven view of
-  daemon state, elapsed time, real input level, VAD state, and discrete provider
-  phases. Decorative animation is not a level or completion measurement.
+- The overlay is now a persistent QML process backed by a 0600 runtime state
+  file. Daemon updates arrive through bounded stdin JSON and the QML view
+  refreshes in place; state text is no longer placed in a process argv. It still
+  needs live input-level/VAD telemetry and discrete provider progress rather
+  than decorative animation alone.
 - Treat request/audio/token counters as daemon-session telemetry and configured
   limits as local soft limits. Provider account balance or billing quota may be
   shown only when fetched from an authoritative provider API with provenance.

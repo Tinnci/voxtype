@@ -5,10 +5,13 @@ import QtQuick.Window
 Window {
     id: root
     readonly property var args: Qt.application.arguments
-    readonly property string stateName: args.length >= 4 ? args[args.length - 4] : "idle"
-    readonly property string heading: args.length >= 3 ? args[args.length - 3] : "VoxType"
-    readonly property string detail: args.length >= 2 ? args[args.length - 2] : ""
-    readonly property int timeoutMs: args.length >= 1 ? Number(args[args.length - 1]) : 2000
+    readonly property string stateFile: args.length >= 1 ? args[args.length - 1] : ""
+    property string stateName: "idle"
+    property string heading: "VoxType"
+    property string detail: ""
+    property int timeoutMs: 0
+    property bool stateVisible: false
+    property double updatedMs: 0
     readonly property color accent: stateName === "listening" ? "#ef4444"
         : stateName === "processing" ? "#f59e0b"
         : stateName === "error" ? "#dc2626"
@@ -29,7 +32,7 @@ Window {
     y: Screen.height - height - 96
     color: "transparent"
     flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus
-    visible: true
+    visible: root.stateVisible
 
     Rectangle {
         anchors.fill: parent
@@ -116,10 +119,37 @@ Window {
         }
     }
 
-    Timer {
-        interval: root.timeoutMs
-        running: root.timeoutMs > 0
-        repeat: false
-        onTriggered: Qt.quit()
+    function refreshState() {
+        if (root.stateFile.length === 0)
+            return
+        const request = new XMLHttpRequest()
+        request.open("GET", "file://" + root.stateFile + "?t=" + Date.now())
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE)
+                return
+            let value = null
+            try { value = JSON.parse(request.responseText) } catch (error) { return }
+            root.stateName = value.state || "idle"
+            root.heading = value.title || "VoxType"
+            root.detail = value.body || ""
+            root.timeoutMs = Number(value.timeout_ms || 0)
+            root.updatedMs = Number(value.updated_ms || 0)
+            root.stateVisible = Boolean(value.visible)
+                && (root.timeoutMs === 0 || Date.now() < root.updatedMs + root.timeoutMs)
+        }
+        request.send()
     }
+
+    Timer {
+        interval: 100
+        running: true
+        repeat: true
+        onTriggered: {
+            root.refreshState()
+            if (!root.stateVisible && root.updatedMs > 0
+                    && Date.now() - root.updatedMs > 300000)
+                Qt.quit()
+        }
+    }
+
 }
