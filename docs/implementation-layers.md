@@ -197,8 +197,13 @@ doubles at protocol and process boundaries so failure behavior remains testable.
   application. Device identity and hot-plug evidence remain capture-adapter
   work rather than calibration heuristics.
 - Replace KGlobalAccel launcher pairs with a press/release-capable portal or KDE
-  adapter for true push-to-talk. Separate Start/Stop actions remain useful but
-  are not push-to-talk.
+  adapter for true push-to-talk. The local Plasma audit confirmed that ad-hoc
+  registration through KGlobalAccel's private D-Bus API creates shortcuts but
+  leaves the component inactive; that experiment was removed. The supported
+  target is `org.freedesktop.portal.GlobalShortcuts` v2, whose Activated and
+  Deactivated signals provide the required press/release lifecycle. Separate
+  Start/Stop actions remain useful but are not push-to-talk. `Meta+Alt+S` is not
+  a suitable default on this host because it belongs to KAccess.
 - Fcitx `COMMIT2` now uses a bounded request ID, one safe retry, in-flight
   recipient replacement, and a cached terminal response. Lost ACKs therefore
   do not require duplicate dispatch. `CONTEXT` now exposes bounded surrounding

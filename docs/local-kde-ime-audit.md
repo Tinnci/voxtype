@@ -1,8 +1,9 @@
 # Local KDE input-method audit
 
-- Audit date: 2026-07-15
+- Audit date: 2026-07-17
 - Host: KDE Plasma 6.7.2, KWin Wayland, CachyOS
-- Scope: read-only inspection; no reboot or keyboard/input-method changes
+- Scope: inspection plus controlled VoxType user-service and Fcitx5 restarts;
+  no system reboot and no keyboard/input-method group changes
 
 ## Current input path
 
@@ -62,11 +63,16 @@ Wayland path.
 ### VoxType
 
 - Active systemd user D-Bus service.
-- KDE application shortcut component is registered.
-- Intended toggle shortcut: `Meta+Alt+V`; start: `Meta+Alt+S`; stop:
-  `Meta+Alt+X`; cancel: `Meta+Alt+Escape`.
-- Current tested insertion backend is clipboard plus the user-owned ydotoold.
-- Current capture backend records through PipeWire-Pulse compatibility.
+- KDE application shortcut components are registered for toggle, cancel and
+  focused-text cleanup.
+- Verified shortcuts: `Meta+Alt+V`, `Meta+Alt+Escape`, and `Meta+Alt+G`.
+  Start/stop desktop sub-actions are not registered by the current Plasma
+  KGlobalAccel implementation. `Meta+Alt+S` also conflicts with KAccess screen
+  reader toggle, so it must not remain the push-to-talk default.
+- Preferred and runtime-tested insertion backend is the strict Fcitx bridge;
+  copy-only was used briefly for a controlled terminal-result test and then
+  restored to `fcitx`.
+- Current capture backend is native `pw-record` at mono 16 kHz S16 PCM.
 
 The shortcuts do not directly conflict, but the two complete dictation stacks
 duplicate microphone, shortcut, OSD, lifecycle, and insertion responsibilities.
@@ -89,10 +95,11 @@ KDE shortcut / Fcitx action
  focused application input context
 ```
 
-The Fcitx bridge should contain no ASR implementation. It talks to the Rust
-daemon over the session bus and owns only input-context operations:
+The Fcitx bridge contains no ASR implementation. The Rust daemon/client talks
+to the addon through a mode-0600 Unix datagram socket; D-Bus remains the public
+daemon API. The addon owns only input-context operations:
 
-- display partial transcript as preedit;
+- display partial transcript as preedit (future streaming increment);
 - commit final transcript directly;
 - cancel/clear preedit;
 - report input purpose, secure-field hints, focus changes, and surrounding-text
@@ -119,6 +126,35 @@ not expose a usable Fcitx input context.
    explicit compatibility mode.
 7. Register one canonical voice shortcut in KGlobalAccel and expose alternate
    language/profile actions as separate shortcuts only when required.
+
+## 2026-07-17 runtime verification
+
+- `voxtyped`, `voxtype-tray`, and Fcitx5 were restarted individually; the
+  system was not rebooted.
+- D-Bus introspection exposes ordered `StateChanged`, transcript-free
+  `SessionFinished`, queryable `SessionResult`, structured Provider/Usage
+  status, and focused-context cleanup.
+- A real one-second microphone session completed through the explicit demo
+  provider and copy-only test backend. `stop --wait` and a later independent
+  `SessionResult(session-2)` query both returned `completed`, `copy-only`, and
+  14 characters. The daemon reported one attempt, one success, zero cloud
+  requests, zero uploaded audio, and zero tokens.
+- Strict Fcitx startup with no focused context failed as
+  `fcitx.bridge_rejected: no-focused-context`; no clipboard downgrade occurred.
+- The current addon was installed and loaded by Fcitx5. With a temporary Kate
+  document focused, `ARM` reported `org.kde.kate`/Wayland and `CONTEXT` returned
+  25 surrounding characters, cursor/anchor positions, generation 93, and
+  `surrounding-text,spell-check` capabilities.
+- Local cleanup returned structured Unicode-safe edits and the expected
+  suggestion `Hello, world!` without storing the surrounding text in history.
+- The Qt cleanup window read a 0600 report file, inherited
+  `QML_XHR_ALLOW_FILE_READ=1`, and removed the report after closing.
+- Overlay state is mode 0600. A runtime defect where Qt 6 rejected local XHR
+  was fixed by explicitly enabling file reads only for the private Overlay and
+  Cleanup QML processes.
+- `doctor audio` captured 14,622 bytes over 456 ms through `pw-record`. The
+  sample reached peak 32768 and was classified as clipping, so microphone gain
+  calibration remains recommended on this host.
 
 ## Additional capabilities enabled by Fcitx integration
 
