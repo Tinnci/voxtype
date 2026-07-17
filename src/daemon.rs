@@ -870,15 +870,15 @@ impl VoxTypeDaemon {
                 session: session.clone(),
             })
             .map_err(map_error)?;
-        notify("VoxType", "No speech detected");
-        overlay(
-            "no-speech",
-            "No speech detected",
-            "Try speaking closer to the microphone",
-            2_200,
+        let (reason, guidance) = no_speech_guidance(
+            &result,
+            self.config.audio.vad_rms_threshold,
+            self.config.audio.vad_minimum_voiced_frames,
         );
+        notify("VoxType", "No speech detected");
+        overlay("no-speech", "No speech detected", guidance, 2_800);
         Ok(VoiceActivity::NoSpeech(format!(
-            "session={session} result=no-speech vad_voiced_frames={} vad_total_frames={} average_rms={} noise_floor={} threshold={} peak={}",
+            "session={session} result=no-speech reason={reason} vad_voiced_frames={} vad_total_frames={} average_rms={} noise_floor={} threshold={} peak={}",
             result.voiced_frames,
             result.total_frames,
             result.average_rms,
@@ -1387,6 +1387,43 @@ const fn fallback_reason(category: ErrorCategory) -> Option<FallbackReason> {
     }
 }
 
+fn no_speech_guidance(
+    result: &VadResult,
+    configured_threshold: u16,
+    minimum_voiced_frames: u32,
+) -> (&'static str, &'static str) {
+    if result.peak >= 32_000 {
+        return (
+            "clipping",
+            "Input clipped · lower microphone gain or move slightly farther away",
+        );
+    }
+    if result.adaptive_threshold >= configured_threshold.saturating_mul(3)
+        && result.noise_floor >= configured_threshold
+    {
+        return (
+            "high-noise",
+            "Background noise is high · reduce noise or run microphone calibration",
+        );
+    }
+    if result.peak < result.adaptive_threshold.saturating_mul(2).max(500) {
+        return (
+            "too-quiet",
+            "Input is too quiet · speak closer or increase microphone gain",
+        );
+    }
+    if result.voiced_frames > 0 && result.voiced_frames < minimum_voiced_frames {
+        return (
+            "speech-too-short",
+            "Speech was too brief · hold the shortcut and speak a little longer",
+        );
+    }
+    (
+        "unconfirmed",
+        "Speech was not confirmed · speak continuously and avoid keyboard noise",
+    )
+}
+
 impl VoxTypeDaemon {
     fn insert_text(&self, session: &SessionId, text: &str) -> Result<CompletedInsertion, VoxError> {
         match self.armed_insertion {
@@ -1539,6 +1576,40 @@ mod tests {
     fn recording_deadline_is_inclusive() {
         assert!(!recording_deadline_reached(Duration::from_secs(119), 120));
         assert!(recording_deadline_reached(Duration::from_secs(120), 120));
+    }
+
+    #[test]
+    fn no_speech_guidance_uses_real_vad_metrics() {
+        let result = |peak, noise_floor, threshold, voiced_frames| VadResult {
+            speech_detected: false,
+            voiced_frames,
+            total_frames: 20,
+            peak,
+            average_rms: noise_floor,
+            noise_floor,
+            adaptive_threshold: threshold,
+            speech_start_frame: None,
+            speech_end_frame: None,
+            trim_start_frame: None,
+            trim_end_frame: None,
+        };
+
+        assert_eq!(
+            no_speech_guidance(&result(32_100, 100, 300, 0), 300, 2).0,
+            "clipping"
+        );
+        assert_eq!(
+            no_speech_guidance(&result(2_000, 500, 900, 0), 300, 2).0,
+            "high-noise"
+        );
+        assert_eq!(
+            no_speech_guidance(&result(400, 100, 300, 0), 300, 2).0,
+            "too-quiet"
+        );
+        assert_eq!(
+            no_speech_guidance(&result(2_000, 100, 300, 1), 300, 2).0,
+            "speech-too-short"
+        );
     }
 
     #[test]
