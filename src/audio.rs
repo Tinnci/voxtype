@@ -5,6 +5,10 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{
+    Mutex,
+    mpsc::{Receiver, sync_channel},
+};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,6 +19,17 @@ pub struct Recording {
     path: PathBuf,
     backend: &'static str,
     reader: Option<JoinHandle<io::Result<u64>>>,
+    frames: Mutex<Receiver<AudioFrameMetrics>>,
+}
+
+/// Bounded, content-free metrics for one 20 ms PCM frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AudioFrameMetrics {
+    pub frame: u64,
+    pub rms: u16,
+    pub peak: u16,
+    pub clipped_samples: u16,
+    pub samples: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,6 +61,7 @@ impl Recording {
         let path = recording_path()?;
         let mut output = File::create(&path)?;
         let (backend, mut command) = capture_command(device);
+        let (frame_sender, frame_receiver) = sync_channel(64);
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -60,6 +76,8 @@ impl Recording {
             .name("voxtype-audio-reader".to_owned())
             .spawn(move || {
                 let mut buffer = [0_u8; 16 * 1024];
+                let mut pending = Vec::with_capacity(BYTES_PER_FRAME);
+                let mut frame = 0_u64;
                 let mut written = 0_u64;
                 loop {
                     let count = source.read(&mut buffer)?;
@@ -70,6 +88,13 @@ impl Recording {
                     output.write_all(&buffer[..count])?;
                     output.flush()?;
                     written = written.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+                    pending.extend_from_slice(&buffer[..count]);
+                    while pending.len() >= BYTES_PER_FRAME {
+                        let metrics = frame_metrics(frame, &pending[..BYTES_PER_FRAME]);
+                        let _ = frame_sender.try_send(metrics);
+                        pending.drain(..BYTES_PER_FRAME);
+                        frame = frame.saturating_add(1);
+                    }
                 }
             })?;
 
@@ -86,6 +111,7 @@ impl Recording {
             path,
             backend,
             reader: Some(reader),
+            frames: Mutex::new(frame_receiver),
         })
     }
 
@@ -127,6 +153,20 @@ impl Recording {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Drains currently available frame metrics without waiting for capture.
+    #[must_use]
+    pub fn drain_frames(&mut self) -> Vec<AudioFrameMetrics> {
+        let mut frames = Vec::new();
+        let receiver = self
+            .frames
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while let Ok(frame) = receiver.try_recv() {
+            frames.push(frame);
+        }
+        frames
     }
 }
 
@@ -210,6 +250,51 @@ fn configured_device(device: Option<&str>) -> Option<&str> {
     device.map(str::trim).filter(|value| !value.is_empty())
 }
 
+const BYTES_PER_FRAME: usize = 640;
+
+fn frame_metrics(frame: u64, pcm: &[u8]) -> AudioFrameMetrics {
+    let mut square_sum = 0_u64;
+    let mut peak = 0_u16;
+    let mut clipped_samples = 0_u16;
+    let mut samples = 0_u16;
+    for bytes in pcm.chunks_exact(2) {
+        let magnitude = i16::from_le_bytes([bytes[0], bytes[1]]).unsigned_abs();
+        peak = peak.max(magnitude);
+        if magnitude >= i16::MAX.unsigned_abs().saturating_sub(32) {
+            clipped_samples = clipped_samples.saturating_add(1);
+        }
+        let value = u64::from(magnitude);
+        square_sum = square_sum.saturating_add(value.saturating_mul(value));
+        samples = samples.saturating_add(1);
+    }
+    let rms = square_sum
+        .checked_div(u64::from(samples))
+        .map(integer_sqrt)
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or_default();
+    AudioFrameMetrics {
+        frame,
+        rms,
+        peak,
+        clipped_samples,
+        samples,
+    }
+}
+
+fn integer_sqrt(value: u64) -> u64 {
+    if value == 0 {
+        return 0;
+    }
+    let mut estimate = 1_u64 << value.ilog2().div_ceil(2);
+    loop {
+        let next = estimate.saturating_add(value / estimate) / 2;
+        if next >= estimate {
+            return estimate;
+        }
+        estimate = next;
+    }
+}
+
 fn command_exists(command: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -281,6 +366,21 @@ mod tests {
             .filter(|arg| arg.starts_with("--device="))
             .collect::<Vec<_>>();
         assert_eq!(devices, ["--device=source.test"]);
+    }
+
+    #[test]
+    fn reports_frame_level_and_clipping_without_retaining_audio() {
+        let mut pcm = vec![0_u8; BYTES_PER_FRAME];
+        for bytes in pcm.chunks_exact_mut(2) {
+            bytes.copy_from_slice(&1_000_i16.to_le_bytes());
+        }
+        pcm[..2].copy_from_slice(&i16::MAX.to_le_bytes());
+        let metrics = frame_metrics(7, &pcm);
+        assert_eq!(metrics.frame, 7);
+        assert!(metrics.rms >= 999);
+        assert_eq!(metrics.peak, i16::MAX.unsigned_abs());
+        assert_eq!(metrics.clipped_samples, 1);
+        assert_eq!(metrics.samples, 320);
     }
 
     #[test]

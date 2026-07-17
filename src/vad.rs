@@ -156,7 +156,9 @@ impl StreamingVad {
         }
     }
 
-    fn process_level(&mut self, rms: u16) -> VadFrameAnalysis {
+    /// Processes a precomputed frame RMS value from a capture adapter.
+    #[must_use]
+    pub fn process_level(&mut self, rms: u16) -> VadFrameAnalysis {
         let frame = self.total_frames;
         self.total_frames = self.total_frames.saturating_add(1);
         self.rms_sum = self.rms_sum.saturating_add(u64::from(rms));

@@ -17,6 +17,14 @@ struct OverlayRequest {
     title: String,
     body: String,
     timeout_ms: u32,
+    #[serde(default)]
+    rms: Option<u16>,
+    #[serde(default)]
+    adaptive_threshold: Option<u16>,
+    #[serde(default)]
+    speech_active: bool,
+    #[serde(default)]
+    clipping_percent: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -27,6 +35,10 @@ struct OverlayState<'a> {
     timeout_ms: u32,
     visible: bool,
     updated_ms: u64,
+    rms: Option<u16>,
+    adaptive_threshold: Option<u16>,
+    speech_active: bool,
+    clipping_percent: u8,
 }
 
 fn main() {
@@ -64,6 +76,10 @@ fn legacy_request(
             .next()
             .unwrap_or_else(|| "2000".to_owned())
             .parse()?,
+        rms: None,
+        adaptive_threshold: None,
+        speech_active: false,
+        clipping_percent: 0,
     })
 }
 
@@ -87,6 +103,10 @@ fn show(request: &OverlayRequest) -> Result<(), Box<dyn Error>> {
         timeout_ms: request.timeout_ms.min(60_000),
         visible: true,
         updated_ms: now_millis(),
+        rms: request.rms,
+        adaptive_threshold: request.adaptive_threshold,
+        speech_active: request.speech_active,
+        clipping_percent: request.clipping_percent.min(100),
     })?;
     ensure_running()?;
     Ok(())
@@ -103,6 +123,10 @@ fn hide() -> Result<(), Box<dyn Error>> {
         timeout_ms: 0,
         visible: false,
         updated_ms: now_millis(),
+        rms: None,
+        adaptive_threshold: None,
+        speech_active: false,
+        clipping_percent: 0,
     })?;
     Ok(())
 }
@@ -240,6 +264,10 @@ mod tests {
             title: "VoxType".to_owned(),
             body: "x".repeat(241),
             timeout_ms: 2_000,
+            rms: None,
+            adaptive_threshold: None,
+            speech_active: false,
+            clipping_percent: 0,
         };
         assert!(validate_request(&request).is_err());
     }
@@ -253,5 +281,18 @@ mod tests {
         .expect("valid update");
         assert_eq!(request.state, "listening");
         assert_eq!(request.timeout_ms, 0);
+    }
+
+    #[test]
+    fn parses_structured_audio_metrics() {
+        let request = read_request(
+            br#"{"state":"listening","title":"Listening","body":"","timeout_ms":0,"rms":420,"adaptive_threshold":300,"speech_active":true,"clipping_percent":2}"#
+                .as_slice(),
+        )
+        .expect("valid telemetry update");
+        assert_eq!(request.rms, Some(420));
+        assert_eq!(request.adaptive_threshold, Some(300));
+        assert!(request.speech_active);
+        assert_eq!(request.clipping_percent, 2);
     }
 }

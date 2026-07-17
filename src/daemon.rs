@@ -1,7 +1,7 @@
 //! D-Bus daemon interface.
 
 use crate::{
-    audio::{Recording, RecordingResult, cleanup_stale_recordings},
+    audio::{AudioFrameMetrics, Recording, RecordingResult, cleanup_stale_recordings},
     config::{
         Config, InsertionBackend, ProfileConfig, ProviderConfig, lookup_deepgram_secret,
         lookup_secret,
@@ -50,6 +50,9 @@ pub struct VoxTypeDaemon {
     transcript_history: VecDeque<String>,
     recording_started_at: Option<Instant>,
     recognition_job: Option<RecognitionJob>,
+    live_vad: Option<vad::StreamingVad>,
+    last_live_audio: Option<vad::VadFrameAnalysis>,
+    last_audio_overlay_at: Option<Instant>,
     quit: bool,
 }
 
@@ -349,6 +352,14 @@ impl VoxTypeDaemon {
         match Recording::start_with_device(Some(self.config.audio.device.as_str())) {
             Ok(recording) => {
                 self.recording = Some(recording);
+                self.live_vad = self.config.audio.vad_enabled.then(|| {
+                    vad::StreamingVad::new(VadConfig {
+                        rms_threshold: self.config.audio.vad_rms_threshold,
+                        minimum_voiced_frames: self.config.audio.vad_minimum_voiced_frames,
+                    })
+                });
+                self.last_live_audio = None;
+                self.last_audio_overlay_at = None;
                 self.recording_started_at = Some(Instant::now());
                 self.active_profile = Some(profile_name);
                 self.machine
@@ -386,6 +397,7 @@ impl VoxTypeDaemon {
 
     fn stop(&mut self, session: &str) -> fdo::Result<String> {
         let active = self.active_session_id(session)?;
+        self.poll_audio_telemetry();
         self.machine
             .apply(Command::Stop {
                 session: active.clone(),
@@ -396,6 +408,9 @@ impl VoxTypeDaemon {
             .take()
             .ok_or_else(|| fdo::Error::Failed("recording process is missing".to_owned()))?;
         self.recording_started_at = None;
+        self.live_vad = None;
+        self.last_live_audio = None;
+        self.last_audio_overlay_at = None;
         let result = recording
             .stop()
             .map_err(|error| fdo::Error::Failed(format!("failed to stop capture: {error}")))?;
@@ -442,6 +457,9 @@ impl VoxTypeDaemon {
             let _ = fs::remove_file(&job.recording_path);
         }
         self.recording_started_at = None;
+        self.live_vad = None;
+        self.last_live_audio = None;
+        self.last_audio_overlay_at = None;
         if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
             FcitxBridge.cancel(&active);
         }
@@ -498,6 +516,9 @@ impl VoxTypeDaemon {
             let _ = fs::remove_file(&job.recording_path);
         }
         self.recording_started_at = None;
+        self.live_vad = None;
+        self.last_live_audio = None;
+        self.last_audio_overlay_at = None;
         if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
             if let Some(session) = self.machine.state().session() {
                 FcitxBridge.cancel(session);
@@ -537,6 +558,9 @@ impl VoxTypeDaemon {
             transcript_history: VecDeque::with_capacity(20),
             recording_started_at: None,
             recognition_job: None,
+            live_vad: None,
+            last_live_audio: None,
+            last_audio_overlay_at: None,
             quit: false,
         })
     }
@@ -653,6 +677,55 @@ impl VoxTypeDaemon {
         self.active_profile = None;
         self.armed_insertion = None;
         result.map(|_| true)
+    }
+
+    /// Consumes bounded capture telemetry and updates the listening overlay.
+    ///
+    /// Only levels, clipping counts, and VAD state are sent to the overlay;
+    /// PCM and transcript data never leave the daemon through this path.
+    pub fn poll_audio_telemetry(&mut self) {
+        let frames = self
+            .recording
+            .as_mut()
+            .map(Recording::drain_frames)
+            .unwrap_or_default();
+        if frames.is_empty() {
+            return;
+        }
+        let Some(live_vad) = self.live_vad.as_mut() else {
+            return;
+        };
+        let mut latest = None;
+        let mut clipped = 0_u32;
+        let mut samples = 0_u32;
+        for AudioFrameMetrics {
+            rms,
+            clipped_samples,
+            samples: frame_samples,
+            ..
+        } in frames
+        {
+            latest = Some(live_vad.process_level(rms));
+            clipped = clipped.saturating_add(u32::from(clipped_samples));
+            samples = samples.saturating_add(u32::from(frame_samples));
+        }
+        let Some(analysis) = latest else {
+            return;
+        };
+        self.last_live_audio = Some(analysis);
+        let now = Instant::now();
+        if self
+            .last_audio_overlay_at
+            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(100))
+        {
+            return;
+        }
+        self.last_audio_overlay_at = Some(now);
+        let clip_percent = clipped
+            .saturating_mul(100)
+            .checked_div(samples)
+            .unwrap_or_default();
+        overlay_audio_metrics(analysis, clip_percent);
     }
 
     fn cleanup_recognition_job(&self, job: &RecognitionJob) {
@@ -1535,6 +1608,38 @@ fn overlay(state: &str, title: &str, body: &str, timeout_millis: u32) {
         "title": title,
         "body": body,
         "timeout_ms": timeout_millis,
+    })
+    .to_string();
+    let Ok(mut child) = ProcessCommand::new("voxtype-overlay")
+        .args(["show"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(payload.as_bytes());
+    }
+}
+
+fn overlay_audio_metrics(analysis: vad::VadFrameAnalysis, clipping_percent: u32) {
+    let payload = serde_json::json!({
+        "state": "listening",
+        "title": "Listening",
+        "body": format!(
+            "RMS {} · threshold {} · {} · clipping {}%",
+            analysis.rms,
+            analysis.adaptive_threshold,
+            if analysis.speech_active { "speech" } else { "noise" },
+            clipping_percent
+        ),
+        "timeout_ms": 0,
+        "rms": analysis.rms,
+        "adaptive_threshold": analysis.adaptive_threshold,
+        "speech_active": analysis.speech_active,
+        "clipping_percent": clipping_percent.min(100),
     })
     .to_string();
     let Ok(mut child) = ProcessCommand::new("voxtype-overlay")

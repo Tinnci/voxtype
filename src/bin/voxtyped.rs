@@ -20,6 +20,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if daemon.should_quit_value() {
             break;
         }
+        daemon.poll_audio_telemetry();
         if let Err(error) = daemon.enforce_recording_deadline() {
             eprintln!("voxtyped deadline handling failed: {error}");
         }

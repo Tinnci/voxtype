@@ -30,6 +30,13 @@ preferred native PipeWire capture adapter; `parec` remains a compatibility
 backend only when the native command is unavailable. Both expose stream
 failures directly while keeping the provider-facing format at mono 16 kHz PCM.
 
+The capture reader now publishes a bounded stream of 20 ms RMS, peak, and
+clipping metrics without retaining audio in the UI path. The daemon consumes
+those frames with the same stateful VAD used for live speech indication and
+updates the overlay with structured level fields. Dropped telemetry never
+blocks PCM recording; the final recognition path still performs authoritative
+offline trim and provider upload checks.
+
 The current energy VAD is real deterministic code but intentionally small. It
 must evolve into a streaming stateful detector with a DC blocker, short/long
 energy, noise updates only outside speech, SNR hysteresis, hangover, and bounded
@@ -162,9 +169,10 @@ doubles at protocol and process boundaries so failure behavior remains testable.
   repeated-word and capitalization rules require explicit acceptance.
 - The overlay is now a persistent QML process backed by a 0600 runtime state
   file. Daemon updates arrive through bounded stdin JSON and the QML view
-  refreshes in place; state text is no longer placed in a process argv. It still
-  needs live input-level/VAD telemetry and discrete provider progress rather
-  than decorative animation alone.
+  refreshes in place; state text is no longer placed in a process argv. The
+  listening view now renders RMS/threshold/speech-active telemetry and keeps
+  processing progress explicitly indeterminate. Ordered provider stages are
+  still needed for a truthful upload/fallback progress indicator.
 - Treat request/audio/token counters as daemon-session telemetry and configured
   limits as local soft limits. Provider account balance or billing quota may be
   shown only when fetched from an authoritative provider API with provenance.

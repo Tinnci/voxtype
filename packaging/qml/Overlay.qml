@@ -12,6 +12,12 @@ Window {
     property int timeoutMs: 0
     property bool stateVisible: false
     property double updatedMs: 0
+    property int rms: 0
+    property int adaptiveThreshold: 0
+    property bool speechActive: false
+    property int clippingPercent: 0
+    readonly property real levelRatio: Math.min(1.0,
+        rms / Math.max(1, adaptiveThreshold * 3))
     readonly property color accent: stateName === "listening" ? "#ef4444"
         : stateName === "processing" ? "#f59e0b"
         : stateName === "error" ? "#dc2626"
@@ -115,6 +121,19 @@ Window {
                         }
                     }
                 }
+                Rectangle {
+                    visible: root.stateName === "listening" && root.adaptiveThreshold > 0
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 3
+                    radius: 2
+                    color: "#30ffffff"
+                    Rectangle {
+                        width: parent.width * root.levelRatio
+                        height: parent.height
+                        radius: parent.radius
+                        color: root.speechActive ? "#22c55e" : "#94a3b8"
+                    }
+                }
             }
         }
     }
@@ -134,6 +153,10 @@ Window {
             root.detail = value.body || ""
             root.timeoutMs = Number(value.timeout_ms || 0)
             root.updatedMs = Number(value.updated_ms || 0)
+            root.rms = Number(value.rms || 0)
+            root.adaptiveThreshold = Number(value.adaptive_threshold || 0)
+            root.speechActive = Boolean(value.speech_active)
+            root.clippingPercent = Number(value.clipping_percent || 0)
             root.stateVisible = Boolean(value.visible)
                 && (root.timeoutMs === 0 || Date.now() < root.updatedMs + root.timeoutMs)
         }
