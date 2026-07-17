@@ -90,7 +90,7 @@ ApplicationWindow {
         let count = 0
         for (let i = 0; i < state.providers.length; ++i) {
             const readiness = state.providers[i].readiness
-            if (readiness === "healthy" || readiness === "configured" || readiness === "degraded")
+            if (readiness === "healthy")
                 ++count
         }
         return count
@@ -109,9 +109,9 @@ ApplicationWindow {
     }
 
     function readinessText(readiness) {
-        if (readiness === "healthy") return qsTr("可用")
-        if (readiness === "configured") return qsTr("已配置 · 未探测")
-        if (readiness === "degraded") return qsTr("可用 · 最近有失败")
+        if (readiness === "healthy") return qsTr("已验证可用")
+        if (readiness === "configured") return qsTr("已配置 · 未验证")
+        if (readiness === "degraded") return qsTr("最近验证失败")
         if (readiness === "unavailable") return qsTr("暂时不可用")
         if (readiness === "setup-needed") return qsTr("需要完成设置")
         if (readiness === "demo") return qsTr("演示模式")
@@ -119,8 +119,8 @@ ApplicationWindow {
     }
 
     function readinessColor(readiness) {
-        if (readiness === "healthy" || readiness === "configured") return "#22c55e"
-        if (readiness === "degraded" || readiness === "demo" || readiness === "unknown") return "#f59e0b"
+        if (readiness === "healthy") return "#22c55e"
+        if (readiness === "configured" || readiness === "degraded" || readiness === "demo" || readiness === "unknown") return "#f59e0b"
         return "#ef4444"
     }
 

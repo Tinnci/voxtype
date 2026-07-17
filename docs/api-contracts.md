@@ -286,7 +286,7 @@ Stop(s session_id) -> (s result)
 Toggle(s profile) -> (s result)
 Cancel(s session_id) -> ()
 Reset() -> ()
-ProviderStatus() -> (s status)
+ProviderStatus() -> (s json)
 UsageStatus() -> (s json)
 LastTranscript() -> (s text)
 TranscriptHistory() -> (as texts)
@@ -302,6 +302,31 @@ InsertTest(s text) -> (s result)
 ```text
 StateChanged(s state, s session_id)
 SessionFinished(s session_id, s outcome, s error_code, s backend, t char_count)
+```
+
+`ProviderStatus` returns a versioned JSON snapshot. A configured credential or
+an open circuit is not proof that a provider works. `verified=true` is emitted
+only after a real successful provider response and expires after the advertised
+TTL. Failures retain stable category/code metadata without exposing response
+bodies or credentials.
+
+```json
+{
+  "schema": 1,
+  "providers": {
+    "cloud": {
+      "route_available": true,
+      "verified": true,
+      "verified_age_seconds": 12,
+      "verification_ttl_seconds": 900,
+      "consecutive_failures": 0,
+      "retry_after_seconds": null,
+      "last_failure_age_seconds": null,
+      "last_error_category": null,
+      "last_error_code": null
+    }
+  }
+}
 ```
 
 `StateChanged` contains lifecycle metadata only and is emitted in the exact

@@ -59,6 +59,7 @@ pub struct VoxTypeDaemon {
 }
 
 const MAX_PENDING_EVENTS: usize = 256;
+const PROVIDER_VERIFICATION_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DaemonEvent {
@@ -92,6 +93,10 @@ struct CompletedInsertion {
 struct ProviderHealthState {
     consecutive_failures: u32,
     blocked_until: Option<Instant>,
+    last_success_at: Option<Instant>,
+    last_failure_at: Option<Instant>,
+    last_error_category: Option<ErrorCategory>,
+    last_error_code: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -176,11 +181,28 @@ impl ProviderHealthState {
         self.blocked_until.is_none_or(|deadline| now >= deadline)
     }
 
-    fn record_retryable_failure_at(&mut self, now: Instant) {
-        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        if self.consecutive_failures >= 3 {
-            self.blocked_until = Some(now + Duration::from_secs(60));
+    fn record_success_at(&mut self, now: Instant) {
+        self.last_success_at = Some(now);
+        self.consecutive_failures = 0;
+        self.blocked_until = None;
+    }
+
+    fn record_failure_at(&mut self, now: Instant, error: &VoxError) {
+        self.last_failure_at = Some(now);
+        self.last_error_category = Some(error.category());
+        self.last_error_code = Some(error.code());
+        if error.is_retryable() {
+            self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+            if self.consecutive_failures >= 3 {
+                self.blocked_until = Some(now + Duration::from_secs(60));
+            }
         }
+    }
+
+    fn verified_at(&self, now: Instant) -> bool {
+        self.last_success_at.is_some_and(|success| {
+            now.saturating_duration_since(success) <= PROVIDER_VERIFICATION_TTL
+        })
     }
 }
 
@@ -259,20 +281,9 @@ impl VoxTypeDaemon {
         char_count: u64,
     ) -> zbus::Result<()>;
 
-    /// Returns a compact snapshot of configured provider health.
+    /// Returns a structured snapshot of configured provider runtime health.
     fn provider_status(&self) -> String {
-        let now = Instant::now();
-        self.config
-            .providers
-            .keys()
-            .map(|id| {
-                let state = self.provider_health.get(id);
-                let available = state.is_none_or(|health| health.is_available_at(now));
-                let failures = state.map_or(0, |health| health.consecutive_failures);
-                format!("{id}:available={available},failures={failures}")
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+        provider_status_json(&self.config, &self.provider_health, Instant::now())
     }
 
     /// Returns session-local consumption counters and configured soft limits.
@@ -811,8 +822,11 @@ impl VoxTypeDaemon {
                 usage.record_audio_exposure(job.audio_millis);
             }
             if let Some(error) = attempt.error {
+                if error.category() == ErrorCategory::Cancelled {
+                    continue;
+                }
                 usage.record_failure();
-                self.provider_failed(&attempt.provider_id, error.is_retryable());
+                self.provider_failed(&attempt.provider_id, &error);
             }
         }
 
@@ -1198,19 +1212,78 @@ impl VoxTypeDaemon {
     }
 
     fn provider_succeeded(&mut self, provider_id: &str) {
-        self.provider_health.remove(provider_id);
+        self.provider_health
+            .entry(provider_id.to_owned())
+            .or_default()
+            .record_success_at(Instant::now());
     }
 
-    fn provider_failed(&mut self, provider_id: &str, retryable: bool) {
-        if !retryable {
-            return;
-        }
+    fn provider_failed(&mut self, provider_id: &str, error: &VoxError) {
         let health = self
             .provider_health
             .entry(provider_id.to_owned())
             .or_default();
-        health.record_retryable_failure_at(Instant::now());
+        health.record_failure_at(Instant::now(), error);
     }
+}
+
+const fn error_category_name(category: ErrorCategory) -> &'static str {
+    match category {
+        ErrorCategory::InvalidArgument => "invalid-argument",
+        ErrorCategory::InvalidState => "invalid-state",
+        ErrorCategory::Configuration => "configuration",
+        ErrorCategory::Authentication => "authentication",
+        ErrorCategory::Permission => "permission",
+        ErrorCategory::Connection => "connection",
+        ErrorCategory::Timeout => "timeout",
+        ErrorCategory::Protocol => "protocol",
+        ErrorCategory::RateLimited => "rate-limited",
+        ErrorCategory::Unavailable => "unavailable",
+        ErrorCategory::Cancelled => "cancelled",
+        ErrorCategory::Internal => "internal",
+    }
+}
+
+fn provider_status_json(
+    config: &Config,
+    states: &std::collections::BTreeMap<String, ProviderHealthState>,
+    now: Instant,
+) -> String {
+    let providers = config
+        .providers
+        .keys()
+        .map(|id| {
+            let state = states.get(id);
+            let route_available = state.is_none_or(|health| health.is_available_at(now));
+            let verified = state.is_some_and(|health| health.verified_at(now));
+            let age = |instant: Option<Instant>| {
+                instant.map(|value| now.saturating_duration_since(value).as_secs())
+            };
+            let retry_after_seconds = state
+                .and_then(|health| health.blocked_until)
+                .and_then(|deadline| deadline.checked_duration_since(now))
+                .map(|duration| duration.as_secs());
+            let health = serde_json::json!({
+                "route_available": route_available,
+                "verified": verified,
+                "verified_age_seconds": state.and_then(|health| age(health.last_success_at)),
+                "verification_ttl_seconds": PROVIDER_VERIFICATION_TTL.as_secs(),
+                "consecutive_failures": state.map_or(0, |health| health.consecutive_failures),
+                "retry_after_seconds": retry_after_seconds,
+                "last_failure_age_seconds": state.and_then(|health| age(health.last_failure_at)),
+                "last_error_category": state
+                    .and_then(|health| health.last_error_category)
+                    .map(error_category_name),
+                "last_error_code": state.and_then(|health| health.last_error_code),
+            });
+            (id.clone(), health)
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>();
+    serde_json::json!({
+        "schema": 1,
+        "providers": providers,
+    })
+    .to_string()
 }
 
 fn run_recognition_worker(
@@ -1819,6 +1892,7 @@ fn overlay_audio_metrics(analysis: vad::VadFrameAnalysis, clipping_percent: u32)
             clipping_percent
         ),
         "timeout_ms": 0,
+        "visible": true,
         "rms": analysis.rms,
         "adaptive_threshold": analysis.adaptive_threshold,
         "speech_active": analysis.speech_active,
@@ -2007,14 +2081,72 @@ text = "test"
     fn provider_health_blocks_after_three_retryable_failures() {
         let now = Instant::now();
         let mut health = ProviderHealthState::default();
+        let error = VoxError::new(
+            ErrorCategory::Connection,
+            "provider.connection",
+            "connection failed",
+        )
+        .with_retryable(true);
 
-        health.record_retryable_failure_at(now);
-        health.record_retryable_failure_at(now);
+        health.record_failure_at(now, &error);
+        health.record_failure_at(now, &error);
         assert!(health.is_available_at(now));
 
-        health.record_retryable_failure_at(now);
+        health.record_failure_at(now, &error);
         assert!(!health.is_available_at(now + Duration::from_secs(59)));
         assert!(health.is_available_at(now + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn provider_verification_requires_recent_real_success() {
+        let now = Instant::now();
+        let mut health = ProviderHealthState::default();
+        assert!(!health.verified_at(now));
+
+        health.record_success_at(now);
+        assert!(health.verified_at(now + Duration::from_secs(899)));
+        assert!(!health.verified_at(now + Duration::from_secs(901)));
+
+        let error = VoxError::new(
+            ErrorCategory::Authentication,
+            "provider.authentication",
+            "invalid credential",
+        );
+        health.record_failure_at(now + Duration::from_secs(2), &error);
+        assert_eq!(health.consecutive_failures, 0);
+        assert_eq!(health.last_error_code, Some("provider.authentication"));
+        assert!(health.is_available_at(now + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn provider_status_never_calls_an_unverified_route_healthy() {
+        let daemon = event_test_daemon();
+        let now = Instant::now();
+        let initial: serde_json::Value = serde_json::from_str(&provider_status_json(
+            &daemon.config,
+            &daemon.provider_health,
+            now,
+        ))
+        .expect("provider status json");
+        assert_eq!(initial["schema"], 1);
+        assert_eq!(initial["providers"]["mock"]["route_available"], true);
+        assert_eq!(initial["providers"]["mock"]["verified"], false);
+
+        let mut states = std::collections::BTreeMap::new();
+        let mut health = ProviderHealthState::default();
+        health.record_success_at(now);
+        states.insert("mock".to_owned(), health);
+        let verified: serde_json::Value = serde_json::from_str(&provider_status_json(
+            &daemon.config,
+            &states,
+            now + Duration::from_secs(1),
+        ))
+        .expect("verified provider status json");
+        assert_eq!(verified["providers"]["mock"]["verified"], true);
+        assert_eq!(
+            verified["providers"]["mock"]["verification_ttl_seconds"],
+            900
+        );
     }
 
     #[test]

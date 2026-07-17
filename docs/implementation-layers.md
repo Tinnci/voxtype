@@ -149,10 +149,11 @@ doubles at protocol and process boundaries so failure behavior remains testable.
   separate opt-in memory feature for `grammar last/history`.
 - Any provider `success` must come from a parsed non-empty provider response or
   a real local command result, never a generated sample string.
-- Provider readiness must not call a configured secret or an untripped circuit
-  breaker "available". Only a successful request or explicit provider probe may
-  produce a time-bounded verified state; providers without a free probe remain
-  `configured, unverified`.
+- Provider readiness no longer calls a configured secret or an untripped
+  circuit breaker "available". `ProviderStatus` is versioned JSON, real
+  successes create a 15-minute verified state, recent failures remain visible,
+  and configured providers without evidence remain `configured, unverified`.
+  The settings summary counts only verified providers as usable.
 - D-Bus must expose an ordered final session outcome. `Stop` returning
   `result=processing` is only acceptance, not recognition success; clients need
   a single completion/failure/cancel event and stable error code without
@@ -178,7 +179,9 @@ doubles at protocol and process boundaries so failure behavior remains testable.
   placed in a process argv. The listening view now renders RMS/threshold/
   speech-active telemetry and keeps processing progress explicitly
   indeterminate. Ordered provider stages are still needed for a truthful
-  upload/fallback progress indicator.
+  upload/fallback progress indicator. Live telemetry preserves the required
+  `visible=true` field, so an audio-level update cannot hide the listening
+  window by replacing the state snapshot with a partial payload.
 - Treat request/audio/token counters as daemon-session telemetry and configured
   limits as local soft limits. Provider account balance or billing quota may be
   shown only when fetched from an authoritative provider API with provenance.

@@ -291,7 +291,9 @@ fn settings_state() -> io::Result<Value> {
             let client = Client::connect(&connection)?;
             client.provider_status()
         })
-        .unwrap_or_default();
+        .ok()
+        .and_then(|status| serde_json::from_str::<Value>(&status).ok())
+        .unwrap_or(Value::Null);
     let providers = config
         .providers
         .iter()
@@ -305,7 +307,7 @@ fn settings_state() -> io::Result<Value> {
                 provider,
                 &live_usage,
                 config.quotas.get(id),
-                provider_health_for(&provider_health, id),
+                &provider_health_for(&provider_health, id),
             )
         })
         .collect::<Vec<_>>();
@@ -336,7 +338,7 @@ fn provider_state(
     provider: &ProviderConfig,
     usage: &Value,
     quota: Option<&ProviderQuotaConfig>,
-    health: &str,
+    health: &Value,
 ) -> Value {
     let (kind, endpoint, model, secret_ref, secret_state, timeout_seconds, smart_format) =
         match provider {
@@ -403,45 +405,43 @@ fn provider_state(
     })
 }
 
-fn provider_health_for<'a>(status: &'a str, provider_id: &str) -> &'a str {
+fn provider_health_for(status: &Value, provider_id: &str) -> Value {
     status
-        .split_whitespace()
-        .find_map(|entry| {
-            let (id, health) = entry.split_once(":available=")?;
-            (id == provider_id).then_some(health)
-        })
-        .unwrap_or("unknown")
+        .pointer(&format!("/providers/{}", json_pointer_escape(provider_id)))
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
-fn provider_readiness(kind: &str, secret_state: &str, health: &str) -> &'static str {
+fn provider_readiness(kind: &str, secret_state: &str, health: &Value) -> &'static str {
     if kind == "mock" {
         return "demo";
     }
     if matches!(secret_state, "missing" | "unavailable") {
         return "setup-needed";
     }
-    if health.starts_with("false") {
+    let Some(health) = health.as_object() else {
+        return "unknown";
+    };
+    if health.get("route_available").and_then(Value::as_bool) == Some(false) {
         return "unavailable";
     }
-    if health.starts_with("true") && provider_failure_count(health) > 0 {
+    let verified = health
+        .get("verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let verified_age = health.get("verified_age_seconds").and_then(Value::as_u64);
+    let failure_age = health
+        .get("last_failure_age_seconds")
+        .and_then(Value::as_u64);
+    let latest_event_is_failure =
+        failure_age.is_some_and(|failure| verified_age.is_none_or(|success| failure <= success));
+    if latest_event_is_failure {
         return "degraded";
     }
-    if health.starts_with("true") {
+    if verified {
         return "healthy";
     }
-    if kind == "command" {
-        "configured"
-    } else {
-        "unknown"
-    }
-}
-
-fn provider_failure_count(health: &str) -> u32 {
-    health
-        .split(',')
-        .find_map(|field| field.strip_prefix("failures="))
-        .and_then(|value| value.parse().ok())
-        .unwrap_or_default()
+    "configured"
 }
 
 fn needs_provider_onboarding(config: &Config) -> bool {
@@ -923,40 +923,72 @@ text = "demo"
 
     #[test]
     fn exposes_provider_readiness_without_calling_configured_count_ready() {
+        let status = json!({
+            "schema": 1,
+            "providers": {
+                "cloud": {
+                    "route_available": false,
+                    "verified": false,
+                    "verified_age_seconds": null,
+                    "last_failure_age_seconds": 1,
+                    "last_error_code": "provider.timeout"
+                }
+            }
+        });
         assert_eq!(
-            provider_health_for(
-                "mock:available=true cloud:available=false,failures=3",
-                "cloud"
-            ),
-            "false,failures=3"
+            provider_health_for(&status, "cloud")["route_available"],
+            false
         );
+        assert!(provider_health_for(&status, "missing").is_null());
         assert_eq!(
-            provider_health_for("cloud:available=true,failures=1", "missing"),
-            "unknown"
-        );
-        assert_eq!(
-            provider_readiness("mock", "not-required", "unknown"),
+            provider_readiness("mock", "not-required", &Value::Null),
             "demo"
         );
         assert_eq!(
-            provider_readiness("deepgram", "missing", "unknown"),
+            provider_readiness("deepgram", "missing", &Value::Null),
             "setup-needed"
         );
         assert_eq!(
-            provider_readiness("deepgram", "configured", "false,failures=3"),
+            provider_readiness("deepgram", "configured", &status["providers"]["cloud"]),
             "unavailable"
         );
         assert_eq!(
-            provider_readiness("deepgram", "configured", "true,failures=1"),
+            provider_readiness(
+                "deepgram",
+                "configured",
+                &json!({
+                    "route_available": true,
+                    "verified": true,
+                    "verified_age_seconds": 30,
+                    "last_failure_age_seconds": 5
+                })
+            ),
             "degraded"
         );
         assert_eq!(
-            provider_readiness("deepgram", "configured", "true,failures=0"),
+            provider_readiness(
+                "deepgram",
+                "configured",
+                &json!({
+                    "route_available": true,
+                    "verified": true,
+                    "verified_age_seconds": 5,
+                    "last_failure_age_seconds": 30
+                })
+            ),
             "healthy"
         );
         assert_eq!(
-            provider_readiness("command", "not-required", "unknown"),
+            provider_readiness(
+                "command",
+                "not-required",
+                &json!({"route_available": true, "verified": false})
+            ),
             "configured"
+        );
+        assert_eq!(
+            provider_readiness("deepgram", "configured", &Value::Null),
+            "unknown"
         );
     }
 }

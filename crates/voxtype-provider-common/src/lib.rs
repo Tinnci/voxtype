@@ -306,15 +306,16 @@ fn finish_curl_attempt(
     max_response_bytes: usize,
 ) -> Result<CurlResponse, CurlFailure> {
     let curl_exit_code = status.code();
+    let http_status = parse_http_status(&diagnostics.bytes);
     let audio_acceptance = classify_audio_acceptance(
         parse_upload_bytes(&diagnostics.bytes),
         curl_exit_code,
+        http_status,
         was_cancelled,
     );
     if was_cancelled {
         return Err(cancelled_failure().with_transport_evidence(audio_acceptance));
     }
-    let http_status = parse_http_status(&diagnostics.bytes);
     let diagnostic = sanitized_diagnostic(&diagnostics.bytes);
 
     if body.overflowed {
@@ -512,10 +513,13 @@ fn parse_upload_bytes(stderr: &[u8]) -> Option<u64> {
 fn classify_audio_acceptance(
     uploaded_bytes: Option<u64>,
     curl_exit_code: Option<i32>,
+    http_status: Option<u16>,
     was_cancelled: bool,
 ) -> AudioAcceptance {
     if uploaded_bytes.is_some_and(|bytes| bytes > 0) {
-        return if curl_exit_code == Some(0) {
+        return if curl_exit_code == Some(0)
+            && http_status.is_some_and(|status| !(300..400).contains(&status))
+        {
             AudioAcceptance::Accepted
         } else {
             AudioAcceptance::PossiblyAccepted
@@ -801,19 +805,27 @@ mod tests {
             Some(684)
         );
         assert_eq!(
-            classify_audio_acceptance(Some(684), Some(0), false),
+            classify_audio_acceptance(Some(684), Some(0), Some(200), false),
             AudioAcceptance::Accepted
         );
         assert_eq!(
-            classify_audio_acceptance(Some(12), Some(56), false),
+            classify_audio_acceptance(Some(12), Some(56), None, false),
             AudioAcceptance::PossiblyAccepted
         );
         assert_eq!(
-            classify_audio_acceptance(Some(0), Some(7), false),
+            classify_audio_acceptance(Some(0), Some(7), None, false),
             AudioAcceptance::NotAccepted
         );
         assert_eq!(
-            classify_audio_acceptance(None, None, true),
+            classify_audio_acceptance(None, None, None, true),
+            AudioAcceptance::PossiblyAccepted
+        );
+        assert_eq!(
+            classify_audio_acceptance(Some(684), Some(0), Some(307), false),
+            AudioAcceptance::PossiblyAccepted
+        );
+        assert_eq!(
+            classify_audio_acceptance(Some(684), Some(0), None, false),
             AudioAcceptance::PossiblyAccepted
         );
     }
