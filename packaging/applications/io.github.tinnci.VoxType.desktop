@@ -18,12 +18,14 @@ Name=Start Dictation
 Name[zh_CN]=开始语音输入
 Exec=voxtype start
 Icon=media-record
+X-KDE-Shortcuts=Meta+Alt+S
 
 [Desktop Action Stop]
 Name=Stop Dictation
 Name[zh_CN]=停止语音输入
 Exec=voxtype stop
 Icon=media-playback-stop
+X-KDE-Shortcuts=Meta+Alt+X
 
 [Desktop Action Cancel]
 Name=Cancel Dictation

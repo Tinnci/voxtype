@@ -33,7 +33,7 @@ struct ExpectedShortcut {
     action_id: &'static str,
 }
 
-const EXPECTED_SHORTCUTS: [ExpectedShortcut; 3] = [
+const EXPECTED_SHORTCUTS: [ExpectedShortcut; 5] = [
     ExpectedShortcut {
         label: "toggle",
         component_path: "/component/io_github_tinnci_VoxType_desktop",
@@ -45,6 +45,18 @@ const EXPECTED_SHORTCUTS: [ExpectedShortcut; 3] = [
         component_path: "/component/io_github_tinnci_VoxType_desktop",
         component_id: "io.github.tinnci.VoxType.desktop",
         action_id: "Cancel",
+    },
+    ExpectedShortcut {
+        label: "start",
+        component_path: "/component/io_github_tinnci_VoxType_desktop",
+        component_id: "io.github.tinnci.VoxType.desktop",
+        action_id: "Start",
+    },
+    ExpectedShortcut {
+        label: "stop",
+        component_path: "/component/io_github_tinnci_VoxType_desktop",
+        component_id: "io.github.tinnci.VoxType.desktop",
+        action_id: "Stop",
     },
     ExpectedShortcut {
         label: "grammar",
@@ -683,8 +695,19 @@ mod tests {
     #[test]
     fn formats_current_plasma_shortcuts() {
         assert_eq!(format_qt_shortcut(402_653_270), "Meta+Alt+V");
+        assert_eq!(format_qt_shortcut(402_653_267), "Meta+Alt+S");
+        assert_eq!(format_qt_shortcut(402_653_272), "Meta+Alt+X");
         assert_eq!(format_qt_shortcut(419_430_400), "Meta+Alt+Escape");
         assert_eq!(format_qt_shortcut(402_653_255), "Meta+Alt+G");
+    }
+
+    #[test]
+    fn diagnoses_every_packaged_voice_action() {
+        let labels = EXPECTED_SHORTCUTS
+            .iter()
+            .map(|shortcut| shortcut.label)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["toggle", "cancel", "start", "stop", "grammar"]);
     }
 
     #[test]

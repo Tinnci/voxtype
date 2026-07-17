@@ -101,7 +101,9 @@ Acceptance criteria:
 
 - P0: register actions with KDE's Global Shortcuts infrastructure over D-Bus or
   provide generated Plasma shortcut entries when registration is unavailable.
-- Expose separate start, stop, toggle, and cancel commands.
+- Expose separate start, stop, toggle, and cancel commands, with independent
+  Plasma actions so users can bind push-to-talk helpers without replacing the
+  toggle shortcut.
 - Avoid requiring root privileges or raw `/dev/input` access for shortcuts.
 - Detect registration conflicts and explain how to resolve them.
 

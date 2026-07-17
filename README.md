@@ -69,7 +69,9 @@ Configure a real provider in `~/.config/voxtype/config.toml`; see
 
 Default Plasma shortcuts:
 
-- `Meta+Alt+V`: start or stop dictation.
+- `Meta+Alt+V`: start or stop dictation;
+- `Meta+Alt+S`: start dictation;
+- `Meta+Alt+X`: stop dictation;
 - `Meta+Alt+Escape`: cancel dictation.
 - `Meta+Alt+G`: check the most recently inserted transcript locally.
 

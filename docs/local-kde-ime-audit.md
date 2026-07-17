@@ -63,7 +63,8 @@ Wayland path.
 
 - Active systemd user D-Bus service.
 - KDE application shortcut component is registered.
-- Intended toggle shortcut: `Meta+Alt+V`; cancel: `Meta+Alt+Escape`.
+- Intended toggle shortcut: `Meta+Alt+V`; start: `Meta+Alt+S`; stop:
+  `Meta+Alt+X`; cancel: `Meta+Alt+Escape`.
 - Current tested insertion backend is clipboard plus the user-owned ydotoold.
 - Current capture backend records through PipeWire-Pulse compatibility.
 
