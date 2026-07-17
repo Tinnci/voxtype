@@ -168,10 +168,15 @@ doubles at protocol and process boundaries so failure behavior remains testable.
   short/long energy, speech-band evidence, calibrated SNR hysteresis, and live
   endpoint events. Feed the recording UI and final trim from the same streaming
   detector. This is an algorithm improvement, not replacement of a mock.
-- Present `grammar.rs` as local typography/text cleanup. A feature called full
-  semantic grammar checking needs a separate pluggable local or online checker
-  plus a review/apply/undo flow. Cleanup must return Unicode-safe span edits;
-  repeated-word and capitalization rules require explicit acceptance.
+- Present `grammar.rs` as local typography/text cleanup. It now returns
+  versioned JSON with Unicode-safe byte spans, exact original/replacement text,
+  stable rule IDs, confidence, safety, and a whole-source fingerprint. Newlines,
+  ellipses and URL tokens are preserved; repeated-word, repeated-punctuation,
+  whitespace-collapse and capitalization suggestions require review. A feature
+  called full semantic grammar checking still needs a separate pluggable local
+  or online checker. `voxtype-cleanup` now renders a private-file-backed Qt 6
+  review window; apply/undo remains disabled until the Fcitx context generation
+  can be atomically checked during replacement.
 - The overlay is now a persistent QML process backed by a 0600 runtime state
   file. State transitions use bounded stdin JSON, while high-rate audio
   telemetry uses the same directory's 0600 atomic state replacement so the

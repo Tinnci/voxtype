@@ -37,7 +37,7 @@ X-KDE-Shortcuts=Meta+Alt+Escape
 [Desktop Action Grammar]
 Name=Review Focused Text
 Name[zh_CN]=整理当前输入框文本
-Exec=voxtype grammar context
+Exec=voxtype-cleanup context
 Icon=tools-check-spelling
 
 [Desktop Action Settings]

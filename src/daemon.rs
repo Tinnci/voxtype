@@ -326,17 +326,7 @@ impl VoxTypeDaemon {
             .map(String::as_str)
             .ok_or_else(|| fdo::Error::Failed("no previous transcript is available".to_owned()))?;
         let report = grammar::check(text);
-        let body = if report.is_clean() {
-            "No local grammar issues found".to_owned()
-        } else {
-            report
-                .issues
-                .iter()
-                .take(2)
-                .map(|issue| issue.message)
-                .collect::<Vec<_>>()
-                .join(" · ")
-        };
+        let body = cleanup_overlay_body(&report, None);
         overlay("grammar", "Local text cleanup", &body, 5_000);
         Ok(report.render())
     }
@@ -363,30 +353,19 @@ impl VoxTypeDaemon {
             ));
         }
         let report = grammar::check(&text);
-        let body = if report.is_clean() {
-            format!("{} · no local cleanup issues", context.target.program)
-        } else {
-            format!(
-                "{} · {}",
-                context.target.program,
-                report
-                    .issues
-                    .iter()
-                    .take(2)
-                    .map(|issue| issue.message)
-                    .collect::<Vec<_>>()
-                    .join(" · ")
-            )
-        };
+        let body = cleanup_overlay_body(&report, Some(&context.target.program));
         overlay("grammar", "Focused text cleanup", &body, 5_000);
-        Ok(format!(
-            "source=fcitx program={} frontend={} generation={} truncated={} {}",
-            context.target.program,
-            context.target.frontend,
-            context.generation,
-            context.truncated,
-            report.render()
-        ))
+        let mut response = serde_json::to_value(&report).map_err(|error| {
+            fdo::Error::Failed(format!("could not serialize cleanup report: {error}"))
+        })?;
+        response["source"] = serde_json::json!({
+            "kind": "fcitx",
+            "program": context.target.program,
+            "frontend": context.target.frontend,
+            "generation": context.generation,
+            "truncated": context.truncated,
+        });
+        Ok(response.to_string())
     }
 
     fn clear_history(&mut self) {
@@ -1225,6 +1204,19 @@ impl VoxTypeDaemon {
             .or_default();
         health.record_failure_at(Instant::now(), error);
     }
+}
+
+fn cleanup_overlay_body(report: &grammar::GrammarReport, source: Option<&str>) -> String {
+    let prefix = source
+        .filter(|value| !value.is_empty())
+        .map_or_else(String::new, |value| format!("{value} · "));
+    if report.is_clean() {
+        return format!("{prefix}no local cleanup suggestions");
+    }
+    format!(
+        "{prefix}{} safe · {} need review",
+        report.safe_edit_count, report.review_edit_count
+    )
 }
 
 const fn error_category_name(category: ErrorCategory) -> &'static str {

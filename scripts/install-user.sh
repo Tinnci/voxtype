@@ -33,8 +33,10 @@ install -Dm755 target/release/voxtyped "$bindir/voxtyped"
 install -Dm755 target/release/voxtype-tray "$bindir/voxtype-tray"
 install -Dm755 target/release/voxtype-overlay "$bindir/voxtype-overlay"
 install -Dm755 target/release/voxtype-settings "$bindir/voxtype-settings"
+install -Dm755 target/release/voxtype-cleanup "$bindir/voxtype-cleanup"
 install -Dm644 packaging/qml/Overlay.qml "$HOME/.local/share/voxtype/Overlay.qml"
 install -Dm644 packaging/qml/Settings.qml "$HOME/.local/share/voxtype/Settings.qml"
+install -Dm644 packaging/qml/Cleanup.qml "$HOME/.local/share/voxtype/Cleanup.qml"
 install -Dm644 packaging/applications/io.github.tinnci.VoxType.desktop \
   "$applications_dir/io.github.tinnci.VoxType.desktop"
 install -Dm644 packaging/applications/io.github.tinnci.VoxType.Settings.desktop \

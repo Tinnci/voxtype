@@ -29,8 +29,9 @@ providers, desktop integration, audio capture, and text insertion replaceable.
 - XDG TOML configuration and KWallet/Secret Service credential references.
 - Qt 6 settings panel for provider status, safe API-key updates, VAD/input
   settings, session-local consumption, and user-defined soft quotas.
-- Frameless KDE overlay, local energy VAD, and an in-memory recent-transcript
-  grammar/typography checker that is disabled by default for privacy.
+- Frameless KDE overlay, local energy VAD, and a private Qt 6 cleanup-review
+  window with Unicode-safe span suggestions. Recent-transcript memory remains
+  disabled by default for privacy.
 - Configurable maximum recording duration and a copy-only insertion mode for
   environments where focus-safe native commit is unavailable.
 - Hardened systemd user services and user-level desktop/D-Bus packaging.
@@ -74,7 +75,7 @@ Default Plasma shortcuts:
 - `Meta+Alt+X`: stop dictation;
 - `Meta+Alt+Escape`: cancel dictation.
 - `Meta+Alt+G`: locally review selected text, or bounded text before the cursor,
-  from the focused non-sensitive Fcitx context.
+  from the focused non-sensitive Fcitx context in a read-only review window.
 
 Run `voxtype doctor shortcut` to inspect KGlobalAccel directly. It reports the
 current and default sequence for each action and distinguishes a missing

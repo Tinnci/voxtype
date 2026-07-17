@@ -329,6 +329,42 @@ bodies or credentials.
 }
 ```
 
+`CheckLastGrammar` and `CheckContextGrammar` return a versioned cleanup-report
+JSON document. Edits use byte offsets that are guaranteed to lie on UTF-8
+character boundaries. Each edit includes the exact original span, replacement,
+stable rule ID, confidence, and either `safe` or `review` safety. The report
+also includes an FNV-1a fingerprint and source length; a future apply operation
+must reject the report when the complete source no longer matches.
+
+```json
+{
+  "schema": 1,
+  "clean": false,
+  "original_fingerprint": "fnv1a64:...",
+  "original_bytes": 18,
+  "original_characters": 18,
+  "suggested": "Hello, world!",
+  "safe_edit_count": 2,
+  "review_edit_count": 2,
+  "edits": [
+    {
+      "start_byte": 0,
+      "end_byte": 2,
+      "original": "  ",
+      "replacement": "",
+      "rule_id": "cleanup.outer-whitespace",
+      "message": "Remove leading horizontal whitespace",
+      "safety": "safe",
+      "confidence": "high"
+    }
+  ]
+}
+```
+
+The Fcitx context form adds a `source` object containing only frontend,
+application identity, generation and truncation metadata. Password/sensitive
+contexts are still rejected inside the addon before text reaches Rust.
+
 `StateChanged` contains lifecycle metadata only and is emitted in the exact
 order accepted by the daemon state machine. It never contains transcript text
 or provider secrets. `SessionFinished` is emitted once after the terminal state

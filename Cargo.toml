@@ -46,6 +46,10 @@ path = "src/bin/voxtype-overlay.rs"
 name = "voxtype-settings"
 path = "src/bin/voxtype-settings.rs"
 
+[[bin]]
+name = "voxtype-cleanup"
+path = "src/bin/voxtype-cleanup.rs"
+
 [lints]
 workspace = true
 

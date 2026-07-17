@@ -83,9 +83,10 @@ the text appearing in the focused field is the required frontend delivery
 evidence.
 
 `voxtype fcitx-context` prints snapshot metadata without printing application
-text. `voxtype grammar context` explicitly reviews selected text, or at most
-1200 characters before the cursor, using the local cleanup rules. Password and
-Sensitive contexts return an error before any text is copied into Rust.
+text. `voxtype-cleanup context` opens a read-only Qt review window for selected
+text, or at most 1200 characters before the cursor. The structured report is
+held in a mode-0600 runtime file and removed when the window closes. Password
+and Sensitive contexts return an error before any text is copied into Rust.
 
 ## Backend selection
 

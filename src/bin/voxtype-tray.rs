@@ -196,8 +196,15 @@ impl TrayMenu {
                 run_action("Cancel dictation", |client| client.cancel(""));
             }
             4 => {
-                #[allow(clippy::redundant_closure_for_method_calls)]
-                run_action("Local text cleanup", |client| client.check_last_grammar());
+                if let Err(error) = std::process::Command::new("voxtype-cleanup")
+                    .arg("last")
+                    .spawn()
+                {
+                    let message = format!("Could not open text cleanup: {error}");
+                    let _ = std::process::Command::new("notify-send")
+                        .args(["--app-name=VoxType", "VoxType", &message])
+                        .spawn();
+                }
             }
             5 =>
             {
