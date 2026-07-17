@@ -5,6 +5,7 @@ use voxtype::audio::Recording;
 use voxtype::client::Client;
 use voxtype::config::{Config, ProviderConfig, config_path, store_secret};
 use voxtype::fcitx::FcitxBridge;
+use voxtype::vad::{self, VadConfig};
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::OwnedObjectPath;
 
@@ -313,19 +314,52 @@ fn doctor_provider() -> Result<(), Box<dyn Error>> {
 
 fn doctor_audio() -> Result<(), Box<dyn Error>> {
     require_idle_daemon("audio doctor")?;
+    let config = Config::load_or_create()?;
     let recording = Recording::start()?;
     std::thread::sleep(std::time::Duration::from_millis(500));
     let result = recording.stop()?;
+    let vad = vad::analyze_file(
+        &result.path,
+        VadConfig {
+            rms_threshold: config.audio.vad_rms_threshold,
+            minimum_voiced_frames: config.audio.vad_minimum_voiced_frames,
+        },
+    )?;
     let cleanup = std::fs::remove_file(&result.path);
     cleanup?;
     if result.bytes == 0 {
         return Err("audio capture produced no PCM data".into());
     }
+    let level = microphone_level_status(vad.peak);
+    let speech_ratio = if vad.total_frames == 0 {
+        0.0
+    } else {
+        f64::from(vad.voiced_frames) / f64::from(vad.total_frames)
+    };
+    let suggested_threshold = vad.noise_floor.saturating_mul(2).saturating_add(80);
     println!(
-        "audio.capture=ok bytes={} duration_ms={} format=s16le rate=16000 channels=1",
-        result.bytes, result.duration_millis
+        "audio.capture=ok bytes={} duration_ms={} format=s16le rate=16000 channels=1 rms={} peak={} level={} noise_floor={} threshold={} suggested_threshold={} speech_ratio={speech_ratio:.3} clipping={}",
+        result.bytes,
+        result.duration_millis,
+        vad.average_rms,
+        vad.peak,
+        level,
+        vad.noise_floor,
+        vad.adaptive_threshold,
+        suggested_threshold,
+        vad.peak >= 32_000,
     );
     Ok(())
+}
+
+const fn microphone_level_status(peak: u16) -> &'static str {
+    if peak >= 32_000 {
+        "clipping"
+    } else if peak < 500 {
+        "too-quiet"
+    } else {
+        "ok"
+    }
 }
 
 fn require_idle_daemon(operation: &str) -> Result<(), Box<dyn Error>> {
@@ -686,5 +720,12 @@ mod tests {
         );
         assert_eq!(classify_shortcut(true, &[], &[]), ShortcutState::Unbound);
         assert_eq!(classify_shortcut(true, &[1], &[]), ShortcutState::Ok);
+    }
+
+    #[test]
+    fn classifies_audio_peak_for_actionable_diagnostics() {
+        assert_eq!(microphone_level_status(100), "too-quiet");
+        assert_eq!(microphone_level_status(2_000), "ok");
+        assert_eq!(microphone_level_status(32_000), "clipping");
     }
 }

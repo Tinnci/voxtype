@@ -76,10 +76,12 @@ grammar model. It should be named and presented accurately; a future grammar
 backend may use LanguageTool or another explicitly configured local/online
 service without putting that dependency in the core daemon.
 
-Audio calibration and `doctor audio` must replace byte-count success with
-device identity, startup latency, RMS, SNR, clipping ratio, captured/dropped
-frames, and actionable confidence. Session-local usage and soft quotas are not
-provider billing balances and must remain labelled as such.
+Audio calibration and `doctor audio` now report RMS, peak/clipping state, noise
+floor, adaptive threshold, speech ratio, and a suggested threshold instead of
+treating non-empty bytes as success. Device identity, startup latency, SNR,
+and captured/dropped frame counters remain the next capture-adapter increment.
+Session-local usage and soft quotas are not provider billing balances and must
+remain labelled as such.
 
 ## Layer 5: verification and delivery
 

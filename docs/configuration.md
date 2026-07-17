@@ -53,9 +53,10 @@ When speech is found, cloud and command providers receive a trimmed recording
 with 160 ms of pre-roll and 300 ms of post-roll. This preserves fast consonant
 onsets and natural endings while avoiding needless silence upload. The settings
 panel can record a 2.5-second local calibration sample and show the noise floor,
-dynamic threshold, peak, and speech ratio. Calibration audio is never uploaded
-and is deleted immediately after analysis; suggested values are only applied
-after explicit confirmation.
+dynamic threshold, peak, and speech ratio. `voxtype doctor audio` reports the
+same metrics plus RMS, clipping state, and a suggested threshold. Calibration
+audio is never uploaded and is deleted immediately after analysis; suggested
+values are only applied after explicit confirmation.
 
 ## Test profile
 
