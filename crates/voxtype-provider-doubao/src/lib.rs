@@ -1,9 +1,11 @@
 //! Clean-room protocol primitives for the unofficial Doubao ASR transport.
 //!
-//! This crate intentionally contains no Android identity constants, network
-//! client, credentials, or copied reference-source code. It implements only
-//! the independently documented protobuf wire envelope, 20 ms PCM framing,
-//! and provider-event interpretation required by a future transport adapter.
+//! This crate intentionally contains no Android identity constants, production
+//! endpoints, or copied reference-source code. It implements independently
+//! documented bootstrap HTTP, protobuf, 20 ms PCM/Opus framing, and provider
+//! event primitives for a future session transport.
+
+pub mod opus_codec;
 
 use serde_json::Value;
 use std::error::Error;

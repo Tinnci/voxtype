@@ -11,10 +11,11 @@ PCM framing, final/VAD event interpretation, bounded bootstrap response parsing,
 redacted persistent IDs, zeroizing tokens, and the exact settings-body MD5
 compatibility field. The bootstrap HTTP transport is now bounded, cancellable,
 loopback-tested, and keeps sensitive URLs/bodies out of process arguments.
-Production endpoint/client-identity templates, WebSocket/TLS, and Opus remain
-gated by the distribution/licensing decision and live opt-in verification. The
-root `doubao-unofficial` feature remains disabled by default until those gates
-are satisfied.
+Raw 20 ms Opus packet encoding now uses the system `libopus` through a small,
+replaceable safe wrapper. Production endpoint/client-identity templates,
+WebSocket/TLS, and live verification remain gated by the distribution/licensing
+decision. The root `doubao-unofficial` feature remains disabled by default until
+those gates are satisfied.
 
 ## Phase 0: decisions and spikes
 

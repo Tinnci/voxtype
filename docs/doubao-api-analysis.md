@@ -19,11 +19,13 @@ interpretation. The bootstrap layer validates caller-supplied persistent IDs,
 parses bounded registration/settings responses, zeroizes `app_key`, computes
 the exact uppercase `x-ss-stub` MD5, and performs cancellable bounded HTTP calls
 through the shared system-curl transport. Sensitive query values and request
-bodies are supplied through curl stdin instead of process arguments.
+bodies are supplied through curl stdin instead of process arguments. A safe
+Rust wrapper around the system `libopus` encodes each exact 20 ms mono frame as
+one raw Opus packet.
 
 The crate deliberately contains no built-in production endpoint or Android
 identity template. The caller must supply both under an explicit distribution
-policy. WebSocket/TLS, Opus, daemon wiring, and live opt-in verification remain.
+policy. WebSocket/TLS, daemon wiring, and live opt-in verification remain.
 The root binary exposes a default-off `doubao-unofficial` build feature so this
 protocol is not linked into normal distribution builds merely because the
 workspace tests its isolated crate.
@@ -130,6 +132,12 @@ The `StartSession` JSON payload observed requests:
 - two-pass and three-pass ASR enabled;
 - input mode `tool`;
 - registered device and client-version metadata.
+
+The production codec is isolated in `opus_codec.rs`. Session tests may replace
+it with a deterministic `OpusFrameEncoder`, avoiding codec-specific golden bytes
+while the real provider still sends standards-compliant raw Opus packets. Codec
+tests decode emitted packets back to exactly 320 samples instead of comparing
+compressed output that can change between compatible libopus versions.
 
 ## Audio contract
 
