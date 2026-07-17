@@ -12,6 +12,7 @@ members = [
     "crates/voxtype-core",
     "crates/voxtype-provider-common",
     "crates/voxtype-provider-deepgram",
+    "crates/voxtype-provider-doubao",
     "crates/voxtype-provider-rest",
 ]
 resolver = "3"

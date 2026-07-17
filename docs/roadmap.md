@@ -5,8 +5,11 @@ provider, official Deepgram batch provider, local command provider, Fcitx5
 focus-safe insertion, copy-only fallback, recording safety deadline, settings,
 stateful VAD, cancellable background provider work, and desktop integration are
 implemented.
-The unofficial Doubao WebSocket/Opus spike remains intentionally deferred until
-terms and client-identity requirements are resolved.
+The unofficial Doubao Provider is now active work. A dependency-light,
+clean-room protocol crate implements the bounded protobuf envelope, exact 20 ms
+PCM framing, and final/VAD event interpretation. Device identity, token
+bootstrap, WebSocket/TLS, and Opus remain gated by the distribution/licensing
+decision and live opt-in verification.
 
 ## Phase 0: decisions and spikes
 

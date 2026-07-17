@@ -741,6 +741,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "voxtype-provider-doubao"
+version = "0.1.0-dev"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "voxtype-provider-rest"
 version = "0.1.0-dev"
 dependencies = [

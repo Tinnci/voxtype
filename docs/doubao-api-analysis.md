@@ -11,6 +11,13 @@ No reference source has been copied into VoxType. Before implementation, the
 licensing and provider terms described in the product requirements must be
 resolved.
 
+The first clean-room implementation increment now lives in
+`crates/voxtype-provider-doubao`. It contains only independently documented
+wire behavior: bounded protobuf envelope encoding/decoding, unknown-field
+skipping, 20 ms PCM frame reassembly/padding, and VAD/interim/final result JSON
+interpretation. It deliberately contains no endpoint, Android identity,
+credential bootstrap, WebSocket, TLS, or Opus implementation yet.
+
 ## Observed service flow
 
 ```text
@@ -197,4 +204,3 @@ into the daemon state machine.
 - One token refresh retry and no infinite authentication loop.
 - A live opt-in test that is excluded from normal CI and never records fixtures
   containing credentials or speech.
-
