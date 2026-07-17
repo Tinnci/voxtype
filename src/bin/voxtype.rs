@@ -350,7 +350,8 @@ fn doctor_audio() -> Result<(), Box<dyn Error>> {
     };
     let suggested_threshold = vad.noise_floor.saturating_mul(2).saturating_add(80);
     println!(
-        "audio.capture=ok bytes={} duration_ms={} format=s16le rate=16000 channels=1 rms={} peak={} level={} noise_floor={} threshold={} suggested_threshold={} speech_ratio={speech_ratio:.3} clipping={}",
+        "audio.capture=ok backend={} bytes={} duration_ms={} format=s16le rate=16000 channels=1 rms={} peak={} level={} noise_floor={} threshold={} suggested_threshold={} speech_ratio={speech_ratio:.3} clipping={}",
+        result.backend,
         result.bytes,
         result.duration_millis,
         vad.average_rms,

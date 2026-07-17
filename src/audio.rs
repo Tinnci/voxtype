@@ -1,4 +1,4 @@
-//! Audio capture adapter using the `PipeWire` `PulseAudio` compatibility service.
+//! Audio capture adapter using native `pw-record` with a `parec` fallback.
 
 use std::fs;
 use std::fs::File;
@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub struct Recording {
     child: Child,
     path: PathBuf,
+    backend: &'static str,
     reader: Option<JoinHandle<io::Result<u64>>>,
 }
 
@@ -21,6 +22,7 @@ pub struct RecordingResult {
     pub path: PathBuf,
     pub bytes: u64,
     pub duration_millis: u64,
+    pub backend: &'static str,
 }
 
 impl Recording {
@@ -29,20 +31,12 @@ impl Recording {
     /// # Errors
     ///
     /// Returns an I/O error if the runtime directory/file cannot be created or
-    /// `parec` cannot be started.
+    /// no `PipeWire` capture command can be started.
     pub fn start() -> io::Result<Self> {
         let path = recording_path()?;
         let mut output = File::create(&path)?;
-        let mut child = Command::new("parec")
-            .args([
-                "--raw",
-                "--format=s16le",
-                "--rate=16000",
-                "--channels=1",
-                "--device=@DEFAULT_SOURCE@",
-                "--latency-msec=20",
-                "--process-time-msec=20",
-            ])
+        let (backend, mut command) = capture_command();
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -73,13 +67,14 @@ impl Recording {
         if let Some(status) = child.try_wait()? {
             let _reader_result = reader.join();
             return Err(io::Error::other(format!(
-                "parec exited during startup with {status}"
+                "{backend} exited during startup with {status}"
             )));
         }
 
         Ok(Self {
             child,
             path,
+            backend,
             reader: Some(reader),
         })
     }
@@ -107,6 +102,7 @@ impl Recording {
             path: self.path.clone(),
             bytes,
             duration_millis,
+            backend: self.backend,
         })
     }
 
@@ -158,6 +154,43 @@ fn recording_path() -> io::Result<PathBuf> {
     Ok(directory.join(format!("recording-{}-{timestamp}.pcm", std::process::id())))
 }
 
+fn capture_command() -> (&'static str, Command) {
+    if command_exists("pw-record") {
+        return ("pw-record", {
+            let mut command = Command::new("pw-record");
+            command.args([
+                "--raw",
+                "--format=s16",
+                "--rate=16000",
+                "--channels=1",
+                "--media-category=Capture",
+                "--media-role=Communication",
+                "--latency=20ms",
+                "-",
+            ]);
+            command
+        });
+    }
+    let mut command = Command::new("parec");
+    command.args([
+        "--raw",
+        "--format=s16le",
+        "--rate=16000",
+        "--channels=1",
+        "--device=@DEFAULT_SOURCE@",
+        "--latency-msec=20",
+        "--process-time-msec=20",
+    ]);
+    ("parec", command)
+}
+
+fn command_exists(command: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|directory| directory.join(command).is_file())
+}
+
 /// Removes abandoned `VoxType` PCM captures from the current runtime directory.
 ///
 /// Files outside the `recording-*.pcm` namespace are never touched.
@@ -188,6 +221,16 @@ mod tests {
     fn duration_uses_sixteen_kilohertz_mono_i16() {
         let bytes = 32_000_u64;
         assert_eq!(bytes.saturating_mul(1_000) / 32_000, 1_000);
+    }
+
+    #[test]
+    fn prefers_native_pipewire_capture_when_available() {
+        let (backend, _command) = capture_command();
+        if command_exists("pw-record") {
+            assert_eq!(backend, "pw-record");
+        } else {
+            assert_eq!(backend, "parec");
+        }
     }
 
     #[test]

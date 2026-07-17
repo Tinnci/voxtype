@@ -41,7 +41,9 @@ round-trip arbitrary MIME offers safely.
 
 ## Voice activity detection and trimming
 
-The local VAD analyzes 20 ms PCM frames without an external DSP library. Its
+The capture adapter prefers native PipeWire `pw-record` and falls back to
+`parec` only when that command is unavailable. The local VAD analyzes 20 ms
+PCM frames without an external DSP library. Its
 stateful core tracks noise only outside confirmed speech, uses separate entry
 and exit thresholds, and emits attack/release/hangover boundary events. Batch
 recordings seed that detector from a low percentile; live capture can feed the

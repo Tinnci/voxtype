@@ -21,10 +21,10 @@ requires explicit buffered replay consent.
 ## Layer 1: capture and speech signal processing
 
 Owns devices, negotiated formats, resampling, bounded audio chunks, level and
-clipping metrics, VAD, endpointing, and the recording spool. `parec` is a real
-capture adapter, not a mock, but it remains a compatibility backend. The target
-backend exposes PipeWire devices and stream failures directly while keeping the
-provider-facing format at mono 16 kHz PCM.
+clipping metrics, VAD, endpointing, and the recording spool. `pw-record` is the
+preferred native PipeWire capture adapter; `parec` remains a compatibility
+backend only when the native command is unavailable. Both expose stream
+failures directly while keeping the provider-facing format at mono 16 kHz PCM.
 
 The current energy VAD is real deterministic code but intentionally small. It
 must evolve into a streaming stateful detector with a DC blocker, short/long

@@ -11,7 +11,7 @@
 
 The MVP starts with standard threads and bounded `std::sync` channels:
 
-- `parec` stdout reader;
+- `pw-record` stdout reader with a `parec` compatibility fallback;
 - synchronous provider request worker;
 - serialized application state machine;
 - blocking D-Bus adapter as required.
@@ -28,7 +28,7 @@ runtime-neutral.
 | CLI parsing | standard library | no parser dependency at current command scale |
 | Config | `serde` + `toml` | schema and atomic serialization are owned by the application package |
 | D-Bus | blocking `zbus`, default features disabled | one IPC/runtime stack |
-| Audio | system `parec` through PipeWire-Pulse | no ALSA/PipeWire headers or build scripts |
+| Audio | system `pw-record`, `parec` fallback | no ALSA/PipeWire headers or build scripts |
 | HTTP/TLS | system `curl` | reuse distribution TLS, proxy, and certificates |
 | JSON | `serde_json` in REST/settings adapters | no JSON in core domain APIs |
 | Secrets | system `secret-tool` / Secret Service | secret material is not stored in TOML or argv |
