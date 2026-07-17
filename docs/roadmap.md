@@ -9,9 +9,12 @@ The unofficial Doubao Provider is now active work. A dependency-light,
 clean-room protocol crate implements the bounded protobuf envelope, exact 20 ms
 PCM framing, final/VAD event interpretation, bounded bootstrap response parsing,
 redacted persistent IDs, zeroizing tokens, and the exact settings-body MD5
-compatibility field. Endpoint/client-identity templates, WebSocket/TLS, and
-Opus remain gated by the distribution/licensing decision and live opt-in
-verification.
+compatibility field. The bootstrap HTTP transport is now bounded, cancellable,
+loopback-tested, and keeps sensitive URLs/bodies out of process arguments.
+Production endpoint/client-identity templates, WebSocket/TLS, and Opus remain
+gated by the distribution/licensing decision and live opt-in verification. The
+root `doubao-unofficial` feature remains disabled by default until those gates
+are satisfied.
 
 ## Phase 0: decisions and spikes
 

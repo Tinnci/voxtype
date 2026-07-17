@@ -721,6 +721,7 @@ dependencies = [
  "voxtype-core",
  "voxtype-provider-common",
  "voxtype-provider-deepgram",
+ "voxtype-provider-doubao",
  "voxtype-provider-rest",
  "zbus",
 ]
@@ -752,6 +753,7 @@ version = "0.1.0-dev"
 dependencies = [
  "md5",
  "serde_json",
+ "voxtype-core",
  "voxtype-provider-common",
 ]
 

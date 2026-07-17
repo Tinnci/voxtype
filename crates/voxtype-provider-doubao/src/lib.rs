@@ -8,11 +8,101 @@
 use serde_json::Value;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use voxtype_provider_common::SecretString;
+use voxtype_core::{ErrorCategory, VoxError};
+use voxtype_provider_common::{
+    CancellationToken, DEFAULT_MAX_RESPONSE_BYTES, SecretString, escape_curl_config,
+    execute_curl_cancellable,
+};
 
 pub const PCM_FRAME_BYTES: usize = 640;
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_BOOTSTRAP_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_REGISTRATION_BODY_BYTES: usize = 256 * 1024;
+const MAX_QUERY_PARAMETERS: usize = 64;
+const SETTINGS_BODY: &[u8] = b"body=null";
+
+/// HTTP endpoints and timeouts for the unofficial credential bootstrap.
+///
+/// Endpoints intentionally have no built-in production defaults: choosing the
+/// observed private service and client identity is a distribution policy
+/// decision made above this protocol crate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BootstrapHttpConfig {
+    pub registration_endpoint: String,
+    pub settings_endpoint: String,
+    pub timeout_seconds: u64,
+}
+
+/// Caller-supplied client metadata shared by registration and settings calls.
+///
+/// Query values may include installation metadata and are therefore redacted
+/// from `Debug`. Reserved identity keys are added by this crate and cannot be
+/// overridden by the caller.
+#[derive(Clone, Eq, PartialEq)]
+pub struct BootstrapRequestContext {
+    pub user_agent: String,
+    pub common_query: Vec<(String, String)>,
+}
+
+impl fmt::Debug for BootstrapRequestContext {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BootstrapRequestContext")
+            .field("user_agent", &"[redacted]")
+            .field(
+                "common_query",
+                &format_args!("[{} redacted pairs]", self.common_query.len()),
+            )
+            .finish()
+    }
+}
+
+/// Bounded serialized registration document supplied by the licensed client
+/// identity layer. Keeping its schema out of this crate prevents an observed
+/// Android identity template from becoming part of the provider-neutral API.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RegistrationDocument(Vec<u8>);
+
+impl fmt::Debug for RegistrationDocument {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("RegistrationDocument")
+            .field(&format_args!("[{} redacted bytes]", self.0.len()))
+            .finish()
+    }
+}
+
+impl RegistrationDocument {
+    /// Serializes a caller-owned JSON object under a strict size bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is not an object, cannot be serialized,
+    /// or exceeds the registration request limit.
+    pub fn from_json(value: &Value) -> Result<Self, BootstrapError> {
+        if !value.is_object() {
+            return Err(BootstrapError(
+                "registration document must be a JSON object",
+            ));
+        }
+        let bytes = serde_json::to_vec(value)
+            .map_err(|_| BootstrapError("could not serialize registration document"))?;
+        if bytes.len() > MAX_REGISTRATION_BODY_BYTES {
+            return Err(BootstrapError("registration document is too large"));
+        }
+        Ok(Self(bytes))
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct DeviceIdentity {
@@ -78,6 +168,266 @@ impl Display for BootstrapError {
 }
 
 impl Error for BootstrapError {}
+
+/// Registers one persistent device identity through the bounded, cancellable
+/// system curl transport.
+///
+/// The full URL and body are written through curl's private stdin config so
+/// device identifiers do not appear in the process argument list.
+///
+/// # Errors
+///
+/// Returns a stable configuration, cancellation, connection, HTTP, or protocol
+/// error. Raw response bodies, query strings, and identifiers are never copied
+/// into the error message.
+pub fn register_device_http(
+    config: &BootstrapHttpConfig,
+    context: &BootstrapRequestContext,
+    document: &RegistrationDocument,
+    cancellation: &CancellationToken,
+) -> Result<RegisteredDevice, VoxError> {
+    validate_bootstrap_config(config, context)?;
+    let url = bootstrap_url(&config.registration_endpoint, &context.common_query, &[])?;
+    let private_config = curl_post_config(
+        &url,
+        &context.user_agent,
+        "application/json",
+        &document.0,
+        None,
+    );
+    let response = execute_curl_cancellable(
+        std::iter::empty::<&str>(),
+        config.timeout_seconds,
+        private_config.as_bytes(),
+        DEFAULT_MAX_RESPONSE_BYTES,
+        cancellation,
+    )
+    .map_err(|error| error.into_vox_error("doubao.registration_http_failed"))?;
+    ensure_not_cancelled(cancellation)?;
+    parse_device_registration(&response.body).map_err(|_| {
+        bootstrap_error(
+            ErrorCategory::Protocol,
+            "doubao.invalid_registration_response",
+            "Doubao registration response did not contain valid identifiers",
+        )
+    })
+}
+
+/// Fetches the refreshable ASR token for a registered device.
+///
+/// # Errors
+///
+/// Returns a stable configuration, cancellation, connection, HTTP, or protocol
+/// error without exposing the device identifier or returned token.
+pub fn fetch_settings_token_http(
+    config: &BootstrapHttpConfig,
+    context: &BootstrapRequestContext,
+    registered: &RegisteredDevice,
+    cancellation: &CancellationToken,
+) -> Result<SecretString, VoxError> {
+    validate_bootstrap_config(config, context)?;
+    validate_registered_device(registered)?;
+    let url = bootstrap_url(
+        &config.settings_endpoint,
+        &context.common_query,
+        &[("device_id", registered.device_id.as_str())],
+    )?;
+    let stub = x_ss_stub(SETTINGS_BODY);
+    let private_config = curl_post_config(
+        &url,
+        &context.user_agent,
+        "application/x-www-form-urlencoded",
+        SETTINGS_BODY,
+        Some(("x-ss-stub", &stub)),
+    );
+    let response = execute_curl_cancellable(
+        std::iter::empty::<&str>(),
+        config.timeout_seconds,
+        private_config.as_bytes(),
+        DEFAULT_MAX_RESPONSE_BYTES,
+        cancellation,
+    )
+    .map_err(|error| error.into_vox_error("doubao.settings_http_failed"))?;
+    ensure_not_cancelled(cancellation)?;
+    parse_settings_token(&response.body).map_err(|_| {
+        bootstrap_error(
+            ErrorCategory::Protocol,
+            "doubao.invalid_settings_response",
+            "Doubao settings response did not contain a valid ASR token",
+        )
+    })
+}
+
+fn validate_bootstrap_config(
+    config: &BootstrapHttpConfig,
+    context: &BootstrapRequestContext,
+) -> Result<(), VoxError> {
+    if !(1..=300).contains(&config.timeout_seconds) {
+        return Err(bootstrap_error(
+            ErrorCategory::Configuration,
+            "doubao.invalid_timeout",
+            "Doubao bootstrap timeout must be between 1 and 300 seconds",
+        ));
+    }
+    for endpoint in [&config.registration_endpoint, &config.settings_endpoint] {
+        voxtype_provider_common::validate_endpoint(
+            endpoint,
+            "Doubao bootstrap endpoints must use HTTPS or loopback HTTP",
+        )?;
+        if endpoint.contains(['?', '#']) || endpoint.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(bootstrap_error(
+                ErrorCategory::Configuration,
+                "doubao.invalid_bootstrap_endpoint",
+                "Doubao bootstrap endpoint must not contain a query, fragment, or control byte",
+            ));
+        }
+    }
+    if context.user_agent.is_empty()
+        || context.user_agent.len() > 512
+        || context
+            .user_agent
+            .bytes()
+            .any(|byte| byte.is_ascii_control())
+    {
+        return Err(bootstrap_error(
+            ErrorCategory::Configuration,
+            "doubao.invalid_user_agent",
+            "Doubao client User-Agent is invalid",
+        ));
+    }
+    if context.common_query.len() > MAX_QUERY_PARAMETERS {
+        return Err(bootstrap_error(
+            ErrorCategory::Configuration,
+            "doubao.too_many_query_parameters",
+            "Doubao client metadata contains too many query parameters",
+        ));
+    }
+    for (key, value) in &context.common_query {
+        if !valid_query_key(key)
+            || value.len() > 1024
+            || value.bytes().any(|byte| byte.is_ascii_control())
+            || key == "device_id"
+        {
+            return Err(bootstrap_error(
+                ErrorCategory::Configuration,
+                "doubao.invalid_query_metadata",
+                "Doubao client query metadata is invalid or overrides a reserved identity field",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_registered_device(registered: &RegisteredDevice) -> Result<(), VoxError> {
+    if registered.device_id.is_empty()
+        || registered.device_id.len() > 128
+        || registered
+            .device_id
+            .bytes()
+            .any(|byte| byte.is_ascii_control())
+    {
+        return Err(bootstrap_error(
+            ErrorCategory::Configuration,
+            "doubao.invalid_registered_device",
+            "registered Doubao device identifier is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn bootstrap_url(
+    endpoint: &str,
+    common_query: &[(String, String)],
+    identity_query: &[(&str, &str)],
+) -> Result<String, VoxError> {
+    let mut url = String::with_capacity(endpoint.len() + 256);
+    url.push_str(endpoint);
+    let mut first = true;
+    for (key, value) in common_query
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .chain(identity_query.iter().copied())
+    {
+        url.push(if first { '?' } else { '&' });
+        first = false;
+        url.push_str(&percent_encode(key));
+        url.push('=');
+        url.push_str(&percent_encode(value));
+        if url.len() > 16 * 1024 {
+            return Err(bootstrap_error(
+                ErrorCategory::Configuration,
+                "doubao.query_too_large",
+                "Doubao bootstrap query is too large",
+            ));
+        }
+    }
+    Ok(url)
+}
+
+fn valid_query_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    encoded
+}
+
+fn curl_post_config(
+    url: &str,
+    user_agent: &str,
+    content_type: &str,
+    body: &[u8],
+    extra_header: Option<(&str, &str)>,
+) -> String {
+    let body = String::from_utf8_lossy(body);
+    let mut config = format!(
+        "request = \"POST\"\nurl = \"{}\"\nheader = \"User-Agent: {}\"\nheader = \"Accept: application/json\"\nheader = \"Content-Type: {}\"\ndata = \"{}\"\n",
+        escape_curl_config(url),
+        escape_curl_config(user_agent),
+        escape_curl_config(content_type),
+        escape_curl_config(&body),
+    );
+    if let Some((name, value)) = extra_header {
+        use std::fmt::Write as _;
+        writeln!(
+            &mut config,
+            "header = \"{}: {}\"",
+            escape_curl_config(name),
+            escape_curl_config(value)
+        )
+        .expect("writing to a String cannot fail");
+    }
+    config
+}
+
+fn bootstrap_error(category: ErrorCategory, code: &'static str, message: &'static str) -> VoxError {
+    VoxError::new(category, code, message)
+}
+
+fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<(), VoxError> {
+    if cancellation.is_cancelled() {
+        Err(bootstrap_error(
+            ErrorCategory::Cancelled,
+            "doubao.bootstrap_cancelled",
+            "Doubao credential bootstrap was cancelled",
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -437,6 +787,58 @@ fn advance(message: &[u8], cursor: &mut usize, count: usize) -> Result<(), Proto
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc::{Receiver, sync_channel};
+    use std::thread;
+    use std::time::Duration;
+
+    fn loopback_response(path: &str, body: &'static str) -> (String, Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback server");
+        let address = listener.local_addr().expect("loopback address");
+        let (sender, receiver) = sync_channel(1);
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept curl request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("set request timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let count = stream.read(&mut buffer).expect("read curl request");
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            sender.send(request).expect("retain request fixture");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write loopback response");
+        });
+        (format!("http://{address}{path}"), receiver)
+    }
 
     #[test]
     fn bootstrap_parses_ids_and_zeroizing_token() {
@@ -478,6 +880,109 @@ mod tests {
     fn settings_stub_is_uppercase_md5_of_exact_body() {
         assert_eq!(x_ss_stub(b"body=null"), "46C03B52742B3F2615A3ABDF1636B754");
         assert_ne!(x_ss_stub(b"body=null"), x_ss_stub(b"body=null\n"));
+    }
+
+    #[test]
+    fn bootstrap_http_keeps_identity_out_of_debug_and_builds_exact_requests() {
+        let (registration_endpoint, registration_request) = loopback_response(
+            "/register",
+            r#"{"data":{"device_id":123456,"install_id":"654321"}}"#,
+        );
+        let (settings_endpoint, settings_request) = loopback_response(
+            "/settings",
+            r#"{"data":{"settings":{"asr_config":{"app_key":"temporary-token"}}}}"#,
+        );
+        let config = BootstrapHttpConfig {
+            registration_endpoint,
+            settings_endpoint,
+            timeout_seconds: 3,
+        };
+        let context = BootstrapRequestContext {
+            user_agent: "VoxType fixture/1".to_owned(),
+            common_query: vec![
+                ("aid".to_owned(), "fixture".to_owned()),
+                ("locale".to_owned(), "zh CN".to_owned()),
+                ("cdid".to_owned(), "cdid-secret".to_owned()),
+            ],
+        };
+        let identity = DeviceIdentity {
+            client_udid: "client-secret".to_owned(),
+            open_udid: "open-secret".to_owned(),
+            cdid: "cdid-secret".to_owned(),
+        };
+        let document = RegistrationDocument::from_json(&serde_json::json!({
+            "magic_tag": "fixture",
+            "header": {"model": "fixture-device"},
+            "generated_at": 1
+        }))
+        .expect("registration document");
+        assert!(!format!("{context:?}").contains("fixture/1"));
+        assert!(!format!("{identity:?}").contains("client-secret"));
+        assert!(!format!("{document:?}").contains("magic_tag"));
+
+        let registered =
+            register_device_http(&config, &context, &document, &CancellationToken::new())
+                .expect("device registration");
+        let token =
+            fetch_settings_token_http(&config, &context, &registered, &CancellationToken::new())
+                .expect("settings token");
+        assert_eq!(token.expose(), "temporary-token");
+
+        let registration = String::from_utf8(
+            registration_request
+                .recv_timeout(Duration::from_secs(3))
+                .expect("registration request"),
+        )
+        .expect("registration request UTF-8");
+        assert!(
+            registration
+                .starts_with("POST /register?aid=fixture&locale=zh%20CN&cdid=cdid-secret HTTP/1.1")
+        );
+        assert!(!registration.contains("client-secret"));
+        assert!(!registration.contains("open-secret"));
+        assert!(registration.contains("User-Agent: VoxType fixture/1"));
+        assert!(registration.contains("\r\n\r\n{\"generated_at\":1,"));
+
+        let settings = String::from_utf8(
+            settings_request
+                .recv_timeout(Duration::from_secs(3))
+                .expect("settings request"),
+        )
+        .expect("settings request UTF-8");
+        assert!(settings.starts_with(
+            "POST /settings?aid=fixture&locale=zh%20CN&cdid=cdid-secret&device_id=123456 HTTP/1.1"
+        ));
+        assert!(settings.contains("x-ss-stub: 46C03B52742B3F2615A3ABDF1636B754"));
+        assert!(settings.ends_with("\r\n\r\nbody=null"));
+    }
+
+    #[test]
+    fn bootstrap_http_rejects_reserved_metadata_and_pre_cancelled_work() {
+        let config = BootstrapHttpConfig {
+            registration_endpoint: "http://127.0.0.1:1/register".to_owned(),
+            settings_endpoint: "http://127.0.0.1:1/settings".to_owned(),
+            timeout_seconds: 1,
+        };
+        let mut context = BootstrapRequestContext {
+            user_agent: "fixture".to_owned(),
+            common_query: vec![("device_id".to_owned(), "override".to_owned())],
+        };
+        let registered = RegisteredDevice {
+            device_id: "123".to_owned(),
+            install_id: String::new(),
+        };
+        let error =
+            fetch_settings_token_http(&config, &context, &registered, &CancellationToken::new())
+                .expect_err("reserved metadata must fail");
+        assert_eq!(error.code(), "doubao.invalid_query_metadata");
+
+        context.common_query.clear();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let error = fetch_settings_token_http(&config, &context, &registered, &cancellation)
+            .expect_err("pre-cancelled bootstrap must fail");
+        assert_eq!(error.category(), ErrorCategory::Cancelled);
+        assert!(!error.to_string().contains("123"));
     }
 
     #[test]

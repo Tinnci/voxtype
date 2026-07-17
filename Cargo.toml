@@ -7,6 +7,13 @@ description = "KDE-first voice typing for Linux"
 repository = "https://github.com/Tinnci/voxtype"
 publish = false
 
+[features]
+default = []
+# The observed Doubao Android-client protocol is unofficial and intentionally
+# excluded from normal distribution builds until its runtime and licensing
+# gates are satisfied.
+doubao-unofficial = ["dep:voxtype-provider-doubao"]
+
 [workspace]
 members = [
     "crates/voxtype-core",
@@ -24,6 +31,7 @@ toml = { version = "1.1.3", default-features = false, features = ["display", "pa
 voxtype-core = { path = "crates/voxtype-core" }
 voxtype-provider-common = { path = "crates/voxtype-provider-common" }
 voxtype-provider-deepgram = { path = "crates/voxtype-provider-deepgram" }
+voxtype-provider-doubao = { path = "crates/voxtype-provider-doubao", optional = true }
 voxtype-provider-rest = { path = "crates/voxtype-provider-rest" }
 zbus = { version = "5.13.2", default-features = false, features = ["async-io", "blocking-api"] }
 

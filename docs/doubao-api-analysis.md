@@ -11,15 +11,22 @@ No reference source has been copied into VoxType. Before implementation, the
 licensing and provider terms described in the product requirements must be
 resolved.
 
-The first clean-room implementation increment now lives in
+The clean-room implementation now lives in
 `crates/voxtype-provider-doubao`. It contains only independently documented
 wire behavior: bounded protobuf envelope encoding/decoding, unknown-field
 skipping, 20 ms PCM frame reassembly/padding, and VAD/interim/final result JSON
-interpretation. The next increment adds caller-supplied persistent identifier
-validation, redacted registration IDs, bounded registration/settings response
-parsing, zeroizing `app_key` storage, and exact uppercase `x-ss-stub` MD5.
-It deliberately contains no endpoint, Android identity template, WebSocket,
-TLS, or Opus implementation yet.
+interpretation. The bootstrap layer validates caller-supplied persistent IDs,
+parses bounded registration/settings responses, zeroizes `app_key`, computes
+the exact uppercase `x-ss-stub` MD5, and performs cancellable bounded HTTP calls
+through the shared system-curl transport. Sensitive query values and request
+bodies are supplied through curl stdin instead of process arguments.
+
+The crate deliberately contains no built-in production endpoint or Android
+identity template. The caller must supply both under an explicit distribution
+policy. WebSocket/TLS, Opus, daemon wiring, and live opt-in verification remain.
+The root binary exposes a default-off `doubao-unofficial` build feature so this
+protocol is not linked into normal distribution builds merely because the
+workspace tests its isolated crate.
 
 ## Observed service flow
 
@@ -56,8 +63,9 @@ last-frame marker + FinishSession -> SessionFinished
 - Method: `POST`
 - URL: `https://log.snssdk.com/service/2/device_register/`
 - User-Agent: Android client identity used by the reference project.
-- Query: application version, generated device identifiers, display/device
-  metadata, locale, OS, and network access fields.
+- Query: application version, `cdid`, display/device metadata, locale, OS, and
+  network access fields. In the audited reference revision, `clientudid` and
+  `openudid` occur in the JSON header rather than as query fields.
 - JSON body: `magic_tag`, a detailed `header`, and millisecond generation time.
 - Required response values: positive `device_id`; `install_id` is also stored.
 
@@ -79,8 +87,9 @@ hash or a security guarantee. VoxType must not generalize it as authentication.
 ## WebSocket transport
 
 - URL observed: `wss://frontier-audio-ime-ws.doubao.com/ocean/api/v1/ws`.
-- Query includes device/application identity, network type, locale, version, and
-  a generated per-connection `session_id`.
+- Query includes device/application identity, network type, locale, and version.
+  The audited reference revision has no separate per-connection `session_id`
+  query field; the request ID is carried in the protobuf envelope.
 - Headers include the observed Android User-Agent and frontier host metadata.
 - Messages are binary protobuf wire-format records.
 - The tiny observed schema uses only varints and length-delimited fields.
@@ -190,6 +199,13 @@ Provider-specific code owns:
 - JSON payload/result interpretation;
 - Opus frame encoding and provider timestamps;
 - mapping upstream errors to stable `ProviderError` categories.
+
+The credential bootstrap boundary accepts a bounded serialized registration
+document and exact common query metadata from a separately licensed
+client-identity layer. The HTTP transport does not infer where a persistent ID
+belongs. This keeps observed Android metadata out of the provider-neutral API
+while allowing loopback tests to verify exact POST/query/header behavior without
+contacting the service.
 
 It must expose only the provider-neutral traits in `api-contracts.md`. No Android
 identity constant, token, protobuf field number, or raw result JSON may escape
