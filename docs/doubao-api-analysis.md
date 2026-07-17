@@ -21,7 +21,11 @@ the exact uppercase `x-ss-stub` MD5, and performs cancellable bounded HTTP calls
 through the shared system-curl transport. Sensitive query values and request
 bodies are supplied through curl stdin instead of process arguments. A safe
 Rust wrapper around the system `libopus` encodes each exact 20 ms mono frame as
-one raw Opus packet.
+one raw Opus packet. A transport-independent session state machine now enforces
+the task/session lifecycle, request-ID matching, non-zero status failures,
+first/middle/last ordering, packet deduplication, cancellation terminality, and
+the requirement that a non-empty final transcript arrive before
+`SessionFinished`.
 
 The crate deliberately contains no built-in production endpoint or Android
 identity template. The caller must supply both under an explicit distribution
@@ -184,6 +188,13 @@ Result JSON is interpreted as:
 A final result is observed when `nonstream_result` is true or when the result is
 non-interim and VAD has finished. The session remains open until
 `SessionFinished`.
+
+The Rust session protocol preserves provider transcript bytes, ignores duplicate
+or older packet numbers, and never lets a stale partial overwrite a newer final.
+Building an audio request does not itself mark audio uploaded: the I/O layer must
+explicitly confirm the successful socket write, which changes replay evidence
+from `NotAccepted` to `PossiblyAccepted`. A matching provider result advances it
+to `Accepted`.
 
 ## Error and retry policy
 

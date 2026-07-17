@@ -6,6 +6,7 @@
 //! event primitives for a future session transport.
 
 pub mod opus_codec;
+pub mod session;
 
 use serde_json::Value;
 use std::error::Error;
@@ -557,7 +558,9 @@ pub fn encode_request(
         .saturating_add(request_id.len())
         .saturating_add(32);
     let mut output = Vec::with_capacity(capacity);
-    write_bytes(&mut output, 2, token.as_bytes());
+    if !token.is_empty() {
+        write_bytes(&mut output, 2, token.as_bytes());
+    }
     write_bytes(&mut output, 3, b"ASR");
     write_bytes(&mut output, 5, method.as_bytes());
     if !json_payload.is_empty() {
@@ -623,11 +626,7 @@ pub fn parse_recognition_event(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let packet_number = extra.get("packet_number").and_then(Value::as_u64);
-    let Some(result) = value
-        .get("results")
-        .and_then(Value::as_array)
-        .and_then(|results| results.last())
-    else {
+    let Some(results) = value.get("results").and_then(Value::as_array) else {
         return Ok(Some(RecognitionEvent {
             text: None,
             interim: true,
@@ -637,23 +636,31 @@ pub fn parse_recognition_event(
             packet_number,
         }));
     };
-    let text = result
-        .get("text")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let interim = result
-        .get("is_interim")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let vad_finished = result
-        .get("is_vad_finished")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let nonstream = result
-        .get("extra")
-        .and_then(|value| value.get("nonstream_result"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let text = results.iter().rev().find_map(|result| {
+        result
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    let interim = !results.iter().any(|result| {
+        result
+            .get("is_interim")
+            .and_then(Value::as_bool)
+            .is_some_and(|interim| !interim)
+    });
+    let vad_finished = results.iter().any(|result| {
+        result
+            .get("is_vad_finished")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
+    let nonstream = results.iter().any(|result| {
+        result
+            .get("extra")
+            .and_then(|value| value.get("nonstream_result"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
     Ok(Some(RecognitionEvent {
         text,
         interim,
