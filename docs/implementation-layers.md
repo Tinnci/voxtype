@@ -12,9 +12,11 @@ is to replace the daemon's synchronous `PreparedProvider` dispatch with a
 bounded background job and connect the core router to real lifecycle states:
 prepared, request started, audio accepted, completed, and cancelled.
 Provider execution is now off the D-Bus object lock with session-checked result
-delivery and cancellable curl/command children. The next routing refinement is
-to report the exact transport `audio accepted` boundary instead of treating a
-started batch request as accepted.
+delivery and cancellable curl/command children. Provider failures carry
+transport-started plus conservative `NotAccepted`, `PossiblyAccepted`, or
+`Accepted` evidence. Fallback and usage accounting no longer infer audio
+exposure from the provider type; ambiguous cancellation or connection loss
+requires explicit buffered replay consent.
 
 ## Layer 1: capture and speech signal processing
 
@@ -33,11 +35,11 @@ endpointing.
 ## Layer 2: provider protocols and transport
 
 OpenAI-compatible REST and Deepgram are real batch protocols. Their loopback
-servers and synthetic PCM are correct test doubles and remain in CI. Required
-hardening is a shared curl result containing exit code, HTTP status, bounded
-body, and upload-start/audio-accepted state; redirects must not forward secrets
-to another origin. Provider IDs, routing, cancellation, and usage types belong
-to the core/application domain rather than one provider crate.
+servers and synthetic PCM are correct test doubles and remain in CI. The shared
+curl result contains exit code, HTTP status, bounded body, and upload evidence;
+redirects cannot forward secrets to another origin. Provider IDs, routing,
+cancellation, and lifecycle/usage types belong to the core/application domain
+rather than one provider crate.
 
 The deterministic mock provider remains available only as an explicit demo and
 test fixture. It must not be the completed first-run experience or count as a

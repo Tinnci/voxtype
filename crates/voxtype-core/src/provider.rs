@@ -3,6 +3,61 @@
 use crate::{AudioChunk, AudioFormat, VoxError};
 use std::fmt::{self, Display, Formatter};
 
+/// What is known about a provider receiving the current audio.
+///
+/// Failure after a transport starts is often ambiguous: a client may be
+/// cancelled or lose the connection after sending some bytes but before the
+/// provider acknowledges them. Routing must treat that case conservatively so
+/// audio is not replayed to another provider without consent.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AudioAcceptance {
+    #[default]
+    NotAccepted,
+    PossiblyAccepted,
+    Accepted,
+}
+
+impl AudioAcceptance {
+    #[must_use]
+    pub const fn may_have_left_process(self) -> bool {
+        !matches!(self, Self::NotAccepted)
+    }
+}
+
+/// A provider failure together with the lifecycle evidence needed by routing
+/// and usage accounting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderAttemptFailure {
+    pub error: VoxError,
+    pub transport_started: bool,
+    pub audio_acceptance: AudioAcceptance,
+}
+
+impl ProviderAttemptFailure {
+    #[must_use]
+    pub const fn before_transport(error: VoxError) -> Self {
+        Self {
+            error,
+            transport_started: false,
+            audio_acceptance: AudioAcceptance::NotAccepted,
+        }
+    }
+
+    #[must_use]
+    pub const fn after_transport(error: VoxError, audio_acceptance: AudioAcceptance) -> Self {
+        Self {
+            error,
+            transport_started: true,
+            audio_acceptance,
+        }
+    }
+
+    #[must_use]
+    pub fn into_error(self) -> VoxError {
+        self.error
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProviderId(String);
 

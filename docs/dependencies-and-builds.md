@@ -41,7 +41,9 @@ into timeout, connection, authentication, rate-limit, and protocol categories.
 Authorization material still enters through private stdin configuration.
 The same runner owns a cloneable atomic cancellation token, polls the child
 without an async runtime, and always kills and reaps curl when a session is
-cancelled.
+cancelled. Curl write-out also reports uploaded bytes. The transport preserves
+`NotAccepted`, `PossiblyAccepted`, or `Accepted` evidence so replay policy does
+not infer privacy state from a provider type or process exit code alone.
 
 ## Dependency acceptance checklist
 

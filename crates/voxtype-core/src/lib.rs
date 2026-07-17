@@ -9,8 +9,9 @@ pub mod session;
 pub use audio::{AudioChunk, AudioFormat, SampleFormat};
 pub use error::{ErrorCategory, VoxError};
 pub use provider::{
-    AsrProvider, AudioSink, ProviderCapabilities, ProviderConnection, ProviderId,
-    RecognitionControl, RecognitionEvent, RecognitionEvents, RecognitionRequest,
+    AsrProvider, AudioAcceptance, AudioSink, ProviderAttemptFailure, ProviderCapabilities,
+    ProviderConnection, ProviderId, RecognitionControl, RecognitionEvent, RecognitionEvents,
+    RecognitionRequest,
 };
 pub use routing::{
     FallbackReason, ProviderHealth, ProviderRouter, ReplayPolicy, RoutePlan, RoutingPolicy,

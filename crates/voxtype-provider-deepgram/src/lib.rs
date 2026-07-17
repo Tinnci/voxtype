@@ -3,7 +3,7 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-use voxtype_core::{ErrorCategory, VoxError};
+use voxtype_core::{AudioAcceptance, ErrorCategory, ProviderAttemptFailure, VoxError};
 pub use voxtype_provider_common::{CancellationToken, SecretString};
 use voxtype_provider_common::{
     DEFAULT_MAX_RESPONSE_BYTES, escape_curl_config, execute_curl_cancellable,
@@ -50,9 +50,25 @@ pub fn transcribe_pcm_cancellable(
     language: &str,
     cancellation: &CancellationToken,
 ) -> Result<Transcription, VoxError> {
-    validate_endpoint(&config.endpoint)?;
-    let wav_path =
-        voxtype_provider_common::pcm_to_wav(pcm_path, "deepgram.wav").map_err(io_error)?;
+    transcribe_pcm_with_evidence(config, pcm_path, language, cancellation)
+        .map_err(ProviderAttemptFailure::into_error)
+}
+
+/// Transcribes PCM and preserves transport/audio lifecycle evidence on error.
+///
+/// # Errors
+///
+/// Returns a structured failure suitable for replay policy and usage
+/// accounting.
+pub fn transcribe_pcm_with_evidence(
+    config: &DeepgramConfig,
+    pcm_path: &Path,
+    language: &str,
+    cancellation: &CancellationToken,
+) -> Result<Transcription, ProviderAttemptFailure> {
+    validate_endpoint(&config.endpoint).map_err(ProviderAttemptFailure::before_transport)?;
+    let wav_path = voxtype_provider_common::pcm_to_wav(pcm_path, "deepgram.wav")
+        .map_err(|error| ProviderAttemptFailure::before_transport(io_error(error)))?;
     let result = request(config, &wav_path, language, cancellation);
     let _remove_result = fs::remove_file(wav_path);
     result
@@ -63,7 +79,7 @@ fn request(
     wav_path: &Path,
     language: &str,
     cancellation: &CancellationToken,
-) -> Result<Transcription, VoxError> {
+) -> Result<Transcription, ProviderAttemptFailure> {
     let url = request_url(config, language);
     let args = [
         "--request".to_owned(),
@@ -86,9 +102,10 @@ fn request(
         DEFAULT_MAX_RESPONSE_BYTES,
         cancellation,
     )
-    .map_err(|error| error.into_vox_error("provider.deepgram.http_failed"))?;
+    .map_err(|error| error.into_attempt_failure("provider.deepgram.http_failed"))?;
 
     parse_transcription(&response.body)
+        .map_err(|error| ProviderAttemptFailure::after_transport(error, AudioAcceptance::Accepted))
 }
 
 fn parse_transcription(response: &[u8]) -> Result<Transcription, VoxError> {
@@ -193,6 +210,19 @@ mod tests {
         assert!(validate_endpoint("http://api.deepgram.com/v1/listen").is_err());
         assert!(validate_endpoint("https://api.deepgram.com/v1/listen").is_ok());
         assert!(validate_endpoint("http://127.0.0.1:8080/v1/listen").is_ok());
+    }
+
+    #[test]
+    fn missing_pcm_fails_before_transport() {
+        let error = transcribe_pcm_with_evidence(
+            &fixture_config("https://api.deepgram.com/v1/listen"),
+            Path::new("/definitely/missing/voxtype-audio.pcm"),
+            "zh",
+            &CancellationToken::new(),
+        )
+        .expect_err("missing PCM must fail");
+        assert!(!error.transport_started);
+        assert_eq!(error.audio_acceptance, AudioAcceptance::NotAccepted);
     }
 
     #[test]

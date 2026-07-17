@@ -3,7 +3,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use voxtype_core::{ErrorCategory, VoxError};
+use voxtype_core::{AudioAcceptance, ErrorCategory, ProviderAttemptFailure, VoxError};
 pub use voxtype_provider_common::{CancellationToken, SecretString};
 use voxtype_provider_common::{
     DEFAULT_MAX_RESPONSE_BYTES, escape_curl_config, execute_curl_cancellable,
@@ -60,8 +60,25 @@ pub fn transcribe_pcm_cancellable(
     language: &str,
     cancellation: &CancellationToken,
 ) -> Result<Transcription, VoxError> {
-    validate_endpoint(&config.endpoint)?;
-    let wav_path = pcm_to_wav(pcm_path).map_err(io_error)?;
+    transcribe_pcm_with_evidence(config, pcm_path, language, cancellation)
+        .map_err(ProviderAttemptFailure::into_error)
+}
+
+/// Transcribes PCM and preserves transport/audio lifecycle evidence on error.
+///
+/// # Errors
+///
+/// Returns a structured failure suitable for replay policy and usage
+/// accounting.
+pub fn transcribe_pcm_with_evidence(
+    config: &RestProviderConfig,
+    pcm_path: &Path,
+    language: &str,
+    cancellation: &CancellationToken,
+) -> Result<Transcription, ProviderAttemptFailure> {
+    validate_endpoint(&config.endpoint).map_err(ProviderAttemptFailure::before_transport)?;
+    let wav_path = pcm_to_wav(pcm_path)
+        .map_err(|error| ProviderAttemptFailure::before_transport(io_error(error)))?;
     let result = request(config, &wav_path, language, cancellation);
     let _remove_result = fs::remove_file(wav_path);
     result
@@ -72,7 +89,7 @@ fn request(
     wav_path: &Path,
     language: &str,
     cancellation: &CancellationToken,
-) -> Result<Transcription, VoxError> {
+) -> Result<Transcription, ProviderAttemptFailure> {
     let mut args = vec![
         "--request".to_owned(),
         "POST".to_owned(),
@@ -99,15 +116,19 @@ fn request(
         DEFAULT_MAX_RESPONSE_BYTES,
         cancellation,
     )
-    .map_err(|error| error.into_vox_error("provider.http_failed"))?;
+    .map_err(|error| error.into_attempt_failure("provider.http_failed"))?;
 
-    let value: serde_json::Value = serde_json::from_slice(&response.body).map_err(|error| {
-        VoxError::new(
-            ErrorCategory::Protocol,
-            "provider.invalid_json",
-            format!("provider returned invalid JSON: {error}"),
-        )
-    })?;
+    let value: serde_json::Value = serde_json::from_slice(&response.body)
+        .map_err(|error| {
+            VoxError::new(
+                ErrorCategory::Protocol,
+                "provider.invalid_json",
+                format!("provider returned invalid JSON: {error}"),
+            )
+        })
+        .map_err(|error| {
+            ProviderAttemptFailure::after_transport(error, AudioAcceptance::Accepted)
+        })?;
     let text = value
         .get("text")
         .and_then(serde_json::Value::as_str)
@@ -119,6 +140,9 @@ fn request(
                 "provider.missing_text",
                 "provider response did not contain non-empty text",
             )
+        })
+        .map_err(|error| {
+            ProviderAttemptFailure::after_transport(error, AudioAcceptance::Accepted)
         })?;
     Ok(Transcription {
         text: text.to_owned(),
@@ -201,6 +225,24 @@ mod tests {
         assert!(validate_endpoint("http://localhost/asr").is_ok());
         assert!(validate_endpoint("http://[::1]:8080/asr").is_ok());
         assert!(validate_endpoint("http://127.0.0.1.example/asr").is_err());
+    }
+
+    #[test]
+    fn missing_pcm_fails_before_transport() {
+        let error = transcribe_pcm_with_evidence(
+            &RestProviderConfig {
+                endpoint: "https://example.com/v1/audio/transcriptions".to_owned(),
+                model: "test".to_owned(),
+                api_key: SecretString::new("test-key".to_owned()),
+                timeout_seconds: 5,
+            },
+            Path::new("/definitely/missing/voxtype-audio.pcm"),
+            "zh",
+            &CancellationToken::new(),
+        )
+        .expect_err("missing PCM must fail");
+        assert!(!error.transport_started);
+        assert_eq!(error.audio_acceptance, AudioAcceptance::NotAccepted);
     }
 
     #[test]

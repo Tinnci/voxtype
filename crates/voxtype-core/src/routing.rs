@@ -1,6 +1,6 @@
 //! Provider selection and privacy-aware fallback policy.
 
-use crate::{ErrorCategory, ProviderId, VoxError};
+use crate::{AudioAcceptance, ErrorCategory, ProviderId, VoxError};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -94,7 +94,7 @@ impl ProviderRouter for OrderedRouter {
 #[must_use]
 pub const fn may_fallback(
     reason: FallbackReason,
-    audio_accepted: bool,
+    audio_acceptance: AudioAcceptance,
     replay: ReplayPolicy,
 ) -> bool {
     let transient = matches!(
@@ -104,7 +104,9 @@ pub const fn may_fallback(
             | FallbackReason::RateLimited
             | FallbackReason::Unavailable
     );
-    transient && (!audio_accepted || matches!(replay, ReplayPolicy::BufferedWithConsent))
+    transient
+        && (matches!(audio_acceptance, AudioAcceptance::NotAccepted)
+            || matches!(replay, ReplayPolicy::BufferedWithConsent))
 }
 
 #[cfg(test)]
@@ -140,13 +142,23 @@ mod tests {
     fn blocks_cloud_replay_without_consent() {
         assert!(!may_fallback(
             FallbackReason::Unavailable,
-            true,
+            AudioAcceptance::Accepted,
             ReplayPolicy::Never
         ));
         assert!(may_fallback(
             FallbackReason::Unavailable,
-            true,
+            AudioAcceptance::Accepted,
             ReplayPolicy::BufferedWithConsent
+        ));
+        assert!(!may_fallback(
+            FallbackReason::Connection,
+            AudioAcceptance::PossiblyAccepted,
+            ReplayPolicy::BeforeAudioAccepted
+        ));
+        assert!(may_fallback(
+            FallbackReason::Connection,
+            AudioAcceptance::NotAccepted,
+            ReplayPolicy::BeforeAudioAccepted
         ));
     }
 }

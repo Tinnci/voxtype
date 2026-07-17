@@ -165,8 +165,9 @@ privacy, and failure boundary.
 
 VoxType separates three different kinds of data:
 
-- reliable session-local counters: provider attempts, request-stage entries,
-  success/failure, and audio time;
+- reliable session-local counters: provider attempts, started transports,
+  success/failure, and audio time for attempts where audio was accepted or may
+  have left the process;
 - token counts explicitly returned by an API `usage` object;
 - user-configured soft limits, which are not provider billing or account
   balances.
@@ -191,9 +192,11 @@ available; VoxType never estimates tokens from transcript length.
 
 ## Fallback privacy policy
 
-Recorded audio is sent to only the primary provider by default. For batch REST
-APIs, an unsuccessful request may already have delivered audio, so fallback is
-not attempted under `replay = "never"` or `before-audio-accepted`.
+Recorded audio is sent to only the primary provider by default. A fallback may
+run without replay consent only when lifecycle evidence proves audio was not
+accepted, such as WAV staging or transport startup failure. Cancellation,
+timeout, HTTP rejection, or connection loss after upload begins is conservative
+`PossiblyAccepted` evidence and does not authorize replay.
 
 To permit replaying the same buffered recording to a second cloud provider, the
 profile must explicitly state:

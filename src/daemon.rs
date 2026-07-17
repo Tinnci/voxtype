@@ -24,15 +24,16 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use voxtype_core::{
-    Command, CommandEffect, ErrorCategory, ReplayPolicy, SessionId, SessionMachine, StartRequest,
-    TriggerMode, VoxError,
+    AudioAcceptance, Command, CommandEffect, ErrorCategory, FallbackReason, ProviderAttemptFailure,
+    ReplayPolicy, SessionId, SessionMachine, StartRequest, TriggerMode, VoxError,
+    routing::may_fallback,
 };
 use voxtype_provider_common::CancellationToken;
 use voxtype_provider_deepgram::{
-    DeepgramConfig, transcribe_pcm_cancellable as transcribe_deepgram_pcm,
+    DeepgramConfig, transcribe_pcm_with_evidence as transcribe_deepgram_pcm,
 };
 use voxtype_provider_rest::{
-    ApiUsage, RestProviderConfig, transcribe_pcm_cancellable as transcribe_pcm,
+    ApiUsage, RestProviderConfig, transcribe_pcm_with_evidence as transcribe_pcm,
 };
 use zbus::fdo;
 
@@ -91,6 +92,13 @@ struct ProviderTranscript {
     api_usage: ApiUsage,
 }
 
+#[derive(Clone, Debug)]
+struct ProviderInvocationSuccess {
+    transcript: ProviderTranscript,
+    transport_started: bool,
+    audio_acceptance: AudioAcceptance,
+}
+
 #[derive(Debug)]
 enum PreparedProvider {
     Mock(String),
@@ -136,7 +144,8 @@ struct RecognitionSuccess {
 #[derive(Debug)]
 struct ProviderAttemptReport {
     provider_id: String,
-    request_started: bool,
+    transport_started: bool,
+    audio_acceptance: AudioAcceptance,
     error: Option<VoxError>,
 }
 
@@ -158,8 +167,11 @@ impl ProviderUsageState {
         self.attempts = self.attempts.saturating_add(1);
     }
 
-    fn record_request(&mut self, audio_millis: u64) {
+    fn record_transport_started(&mut self) {
         self.requests = self.requests.saturating_add(1);
+    }
+
+    fn record_audio_exposure(&mut self, audio_millis: u64) {
         self.audio_millis = self.audio_millis.saturating_add(audio_millis);
     }
 
@@ -595,8 +607,11 @@ impl VoxTypeDaemon {
                 .entry(attempt.provider_id.clone())
                 .or_default();
             usage.record_attempt();
-            if attempt.request_started {
-                usage.record_request(job.audio_millis);
+            if attempt.transport_started {
+                usage.record_transport_started();
+            }
+            if attempt.audio_acceptance.may_have_left_process() {
+                usage.record_audio_exposure(job.audio_millis);
             }
             if let Some(error) = attempt.error {
                 usage.record_failure();
@@ -944,7 +959,8 @@ fn run_recognition_worker(
                 let retryable = error.is_retryable();
                 attempts.push(ProviderAttemptReport {
                     provider_id,
-                    request_started: false,
+                    transport_started: false,
+                    audio_acceptance: AudioAcceptance::NotAccepted,
                     error: Some(error.clone()),
                 });
                 last_error = Some(error);
@@ -954,32 +970,40 @@ fn run_recognition_worker(
                 continue;
             }
         };
-        let request_started = !matches!(&prepared, PreparedProvider::Mock(_));
         match invoke_provider(prepared, pcm_path, language, cancellation) {
-            Ok(transcript) => {
+            Ok(success) => {
                 attempts.push(ProviderAttemptReport {
                     provider_id: provider_id.clone(),
-                    request_started,
+                    transport_started: success.transport_started,
+                    audio_acceptance: success.audio_acceptance,
                     error: None,
                 });
                 return RecognitionWorkerResult {
                     attempts,
                     outcome: Ok(RecognitionSuccess {
                         provider_id,
-                        transcript,
+                        transcript: success.transcript,
                     }),
                 };
             }
-            Err(error) => {
+            Err(failure) => {
+                let ProviderAttemptFailure {
+                    error,
+                    transport_started,
+                    audio_acceptance,
+                } = failure;
                 let retryable = error.is_retryable();
                 let cancelled = error.category() == ErrorCategory::Cancelled;
+                let fallback_allowed = fallback_reason(error.category())
+                    .is_some_and(|reason| may_fallback(reason, audio_acceptance, replay));
                 attempts.push(ProviderAttemptReport {
                     provider_id,
-                    request_started,
+                    transport_started,
+                    audio_acceptance,
                     error: Some(error.clone()),
                 });
                 last_error = Some(error);
-                if cancelled || !retryable || replay != ReplayPolicy::BufferedWithConsent {
+                if cancelled || !retryable || !fallback_allowed {
                     break;
                 }
             }
@@ -1057,25 +1081,37 @@ fn invoke_provider(
     pcm_path: &Path,
     language: &str,
     cancellation: &CancellationToken,
-) -> Result<ProviderTranscript, VoxError> {
+) -> Result<ProviderInvocationSuccess, ProviderAttemptFailure> {
     if cancellation.is_cancelled() {
-        return Err(cancelled_error());
+        return Err(ProviderAttemptFailure::before_transport(cancelled_error()));
     }
     match provider {
-        PreparedProvider::Mock(text) => Ok(ProviderTranscript {
-            text,
-            api_usage: ApiUsage::default(),
+        PreparedProvider::Mock(text) => Ok(ProviderInvocationSuccess {
+            transcript: ProviderTranscript {
+                text,
+                api_usage: ApiUsage::default(),
+            },
+            transport_started: false,
+            audio_acceptance: AudioAcceptance::NotAccepted,
         }),
         PreparedProvider::Rest(config) => transcribe_pcm(&config, pcm_path, language, cancellation)
-            .map(|result| ProviderTranscript {
-                text: result.text,
-                api_usage: result.usage,
+            .map(|result| ProviderInvocationSuccess {
+                transcript: ProviderTranscript {
+                    text: result.text,
+                    api_usage: result.usage,
+                },
+                transport_started: true,
+                audio_acceptance: AudioAcceptance::Accepted,
             }),
         PreparedProvider::Deepgram(config) => {
             transcribe_deepgram_pcm(&config, pcm_path, language, cancellation).map(|result| {
-                ProviderTranscript {
-                    text: result.text,
-                    api_usage: ApiUsage::default(),
+                ProviderInvocationSuccess {
+                    transcript: ProviderTranscript {
+                        text: result.text,
+                        api_usage: ApiUsage::default(),
+                    },
+                    transport_started: true,
+                    audio_acceptance: AudioAcceptance::Accepted,
                 }
             })
         }
@@ -1083,7 +1119,7 @@ fn invoke_provider(
             program,
             args,
             timeout_seconds,
-        } => transcribe_command_cancellable(
+        } => transcribe_command_with_evidence(
             &program,
             &args,
             timeout_seconds,
@@ -1091,9 +1127,13 @@ fn invoke_provider(
             language,
             cancellation,
         )
-        .map(|text| ProviderTranscript {
-            text,
-            api_usage: ApiUsage::default(),
+        .map(|text| ProviderInvocationSuccess {
+            transcript: ProviderTranscript {
+                text,
+                api_usage: ApiUsage::default(),
+            },
+            transport_started: true,
+            audio_acceptance: AudioAcceptance::Accepted,
         }),
     }
 }
@@ -1116,6 +1156,7 @@ fn transcribe_command(
     )
 }
 
+#[cfg(test)]
 fn transcribe_command_cancellable(
     program: &str,
     args: &[String],
@@ -1124,8 +1165,27 @@ fn transcribe_command_cancellable(
     language: &str,
     cancellation: &CancellationToken,
 ) -> Result<String, VoxError> {
+    transcribe_command_with_evidence(
+        program,
+        args,
+        timeout_seconds,
+        pcm_path,
+        language,
+        cancellation,
+    )
+    .map_err(ProviderAttemptFailure::into_error)
+}
+
+fn transcribe_command_with_evidence(
+    program: &str,
+    args: &[String],
+    timeout_seconds: u64,
+    pcm_path: &Path,
+    language: &str,
+    cancellation: &CancellationToken,
+) -> Result<String, ProviderAttemptFailure> {
     if cancellation.is_cancelled() {
-        return Err(cancelled_error());
+        return Err(ProviderAttemptFailure::before_transport(cancelled_error()));
     }
     let mut child = ProcessCommand::new(program)
         .args(args)
@@ -1136,91 +1196,144 @@ fn transcribe_command_cancellable(
         .process_group(0)
         .spawn()
         .map_err(|error| {
-            VoxError::new(
-                ErrorCategory::Unavailable,
-                "provider.command_failed",
-                error.to_string(),
+            ProviderAttemptFailure::before_transport(
+                VoxError::new(
+                    ErrorCategory::Unavailable,
+                    "provider.command_failed",
+                    error.to_string(),
+                )
+                .with_retryable(true),
             )
-            .with_retryable(true)
         })?;
     let stdout = child.stdout.take().ok_or_else(|| {
-        VoxError::new(
-            ErrorCategory::Internal,
-            "provider.command_output",
-            "command provider stdout is unavailable",
+        ProviderAttemptFailure::after_transport(
+            VoxError::new(
+                ErrorCategory::Internal,
+                "provider.command_output",
+                "command provider stdout is unavailable",
+            ),
+            AudioAcceptance::PossiblyAccepted,
         )
     })?;
     let output_reader = thread::spawn(move || read_command_output(stdout, 1024 * 1024));
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(|error| {
-            VoxError::new(
-                ErrorCategory::Unavailable,
-                "provider.command_wait",
-                error.to_string(),
-            )
-        })? {
-            break status;
+    let status = match wait_for_command(&mut child, deadline, cancellation) {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = output_reader.join();
+            return Err(error);
         }
-        if Instant::now() >= deadline {
-            terminate_process_group(&mut child);
-            return Err(VoxError::new(
-                ErrorCategory::Timeout,
-                "provider.command_timeout",
-                "command provider timed out",
-            )
-            .with_retryable(true));
-        }
-        if cancellation.is_cancelled() {
-            terminate_process_group(&mut child);
-            return Err(cancelled_error());
-        }
-        std::thread::sleep(Duration::from_millis(20));
     };
     let output = output_reader
         .join()
         .map_err(|_| {
-            VoxError::new(
-                ErrorCategory::Internal,
-                "provider.command_output",
-                "command output reader panicked",
+            ProviderAttemptFailure::after_transport(
+                VoxError::new(
+                    ErrorCategory::Internal,
+                    "provider.command_output",
+                    "command output reader panicked",
+                ),
+                AudioAcceptance::Accepted,
             )
         })?
         .map_err(|error| {
-            VoxError::new(
-                ErrorCategory::Unavailable,
-                "provider.command_output",
-                error.to_string(),
+            ProviderAttemptFailure::after_transport(
+                VoxError::new(
+                    ErrorCategory::Unavailable,
+                    "provider.command_output",
+                    error.to_string(),
+                ),
+                AudioAcceptance::Accepted,
             )
         })?;
+    finish_command_output(status, output)
+}
+
+fn wait_for_command(
+    child: &mut std::process::Child,
+    deadline: Instant,
+    cancellation: &CancellationToken,
+) -> Result<std::process::ExitStatus, ProviderAttemptFailure> {
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            ProviderAttemptFailure::after_transport(
+                VoxError::new(
+                    ErrorCategory::Unavailable,
+                    "provider.command_wait",
+                    error.to_string(),
+                ),
+                AudioAcceptance::PossiblyAccepted,
+            )
+        })? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            terminate_process_group(child);
+            return Err(ProviderAttemptFailure::after_transport(
+                VoxError::new(
+                    ErrorCategory::Timeout,
+                    "provider.command_timeout",
+                    "command provider timed out",
+                )
+                .with_retryable(true),
+                AudioAcceptance::PossiblyAccepted,
+            ));
+        }
+        if cancellation.is_cancelled() {
+            terminate_process_group(child);
+            return Err(ProviderAttemptFailure::after_transport(
+                cancelled_error(),
+                AudioAcceptance::PossiblyAccepted,
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn finish_command_output(
+    status: std::process::ExitStatus,
+    output: BoundedCommandOutput,
+) -> Result<String, ProviderAttemptFailure> {
     if output.overflowed {
-        return Err(VoxError::new(
-            ErrorCategory::Protocol,
-            "provider.command_output_too_large",
-            "command provider output exceeded 1048576 bytes",
+        return Err(ProviderAttemptFailure::after_transport(
+            VoxError::new(
+                ErrorCategory::Protocol,
+                "provider.command_output_too_large",
+                "command provider output exceeded 1048576 bytes",
+            ),
+            AudioAcceptance::Accepted,
         ));
     }
     if !status.success() {
-        return Err(VoxError::new(
-            ErrorCategory::Unavailable,
-            "provider.command_exit",
-            format!("command exited with {status}"),
-        )
-        .with_retryable(true));
+        return Err(ProviderAttemptFailure::after_transport(
+            VoxError::new(
+                ErrorCategory::Unavailable,
+                "provider.command_exit",
+                format!("command exited with {status}"),
+            )
+            .with_retryable(true),
+            AudioAcceptance::Accepted,
+        ));
     }
     let text = String::from_utf8(output.bytes).map_err(|error| {
-        VoxError::new(
-            ErrorCategory::Protocol,
-            "provider.command_output",
-            error.to_string(),
+        ProviderAttemptFailure::after_transport(
+            VoxError::new(
+                ErrorCategory::Protocol,
+                "provider.command_output",
+                error.to_string(),
+            ),
+            AudioAcceptance::Accepted,
         )
     })?;
     let text = text.trim().to_owned();
     if text.is_empty() {
-        return Err(VoxError::new(
-            ErrorCategory::Protocol,
-            "provider.command_empty",
-            "command provider returned empty output",
+        return Err(ProviderAttemptFailure::after_transport(
+            VoxError::new(
+                ErrorCategory::Protocol,
+                "provider.command_empty",
+                "command provider returned empty output",
+            ),
+            AudioAcceptance::Accepted,
         ));
     }
     Ok(text)
@@ -1262,6 +1375,16 @@ fn cancelled_error() -> VoxError {
         "provider.cancelled",
         "recognition was cancelled",
     )
+}
+
+const fn fallback_reason(category: ErrorCategory) -> Option<FallbackReason> {
+    match category {
+        ErrorCategory::Connection => Some(FallbackReason::Connection),
+        ErrorCategory::Timeout => Some(FallbackReason::Timeout),
+        ErrorCategory::RateLimited => Some(FallbackReason::RateLimited),
+        ErrorCategory::Unavailable => Some(FallbackReason::Unavailable),
+        _ => None,
+    }
 }
 
 impl VoxTypeDaemon {
@@ -1385,7 +1508,10 @@ mod tests {
         assert_eq!(usage.audio_millis, 0);
 
         usage.record_attempt();
-        usage.record_request(1_250);
+        usage.record_transport_started();
+        assert_eq!(usage.requests, 1);
+        assert_eq!(usage.audio_millis, 0);
+        usage.record_audio_exposure(1_250);
         usage.record_success(ApiUsage::default());
         assert_eq!(usage.requests, 1);
         assert_eq!(usage.audio_millis, 1_250);
@@ -1393,7 +1519,8 @@ mod tests {
         assert_eq!(usage.reported_tokens, 0);
 
         usage.record_attempt();
-        usage.record_request(750);
+        usage.record_transport_started();
+        usage.record_audio_exposure(750);
         usage.record_success(ApiUsage {
             input_tokens: Some(12),
             output_tokens: Some(3),
@@ -1575,7 +1702,48 @@ text = "fixed text"
             &CancellationToken::new(),
         );
         assert_eq!(result.attempts.len(), 1);
+        assert!(result.attempts[0].transport_started);
+        assert_eq!(
+            result.attempts[0].audio_acceptance,
+            AudioAcceptance::Accepted
+        );
         assert!(result.outcome.is_err());
+    }
+
+    #[test]
+    fn worker_can_fallback_when_transport_never_started() {
+        let result = run_recognition_worker(
+            vec![
+                (
+                    "missing-command".to_owned(),
+                    ProviderConfig::Command {
+                        program: "/definitely/missing/voxtype-provider".to_owned(),
+                        args: Vec::new(),
+                        timeout_seconds: 1,
+                    },
+                ),
+                (
+                    "demo".to_owned(),
+                    ProviderConfig::Mock {
+                        text: "fallback result".to_owned(),
+                    },
+                ),
+            ],
+            ReplayPolicy::BeforeAudioAccepted,
+            Path::new("/tmp/audio.pcm"),
+            "zh",
+            &CancellationToken::new(),
+        );
+        assert_eq!(result.attempts.len(), 2);
+        assert!(!result.attempts[0].transport_started);
+        assert_eq!(
+            result.attempts[0].audio_acceptance,
+            AudioAcceptance::NotAccepted
+        );
+        assert_eq!(
+            result.outcome.expect("fallback succeeds").transcript.text,
+            "fallback result"
+        );
     }
 
     #[test]

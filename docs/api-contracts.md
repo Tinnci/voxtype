@@ -191,6 +191,18 @@ pub enum ReplayPolicy {
     BeforeAudioAccepted,
     BufferedWithConsent,
 }
+
+pub enum AudioAcceptance {
+    NotAccepted,
+    PossiblyAccepted,
+    Accepted,
+}
+
+pub struct ProviderAttemptFailure {
+    pub error: VoxError,
+    pub transport_started: bool,
+    pub audio_acceptance: AudioAcceptance,
+}
 ```
 
 Routing rules:
@@ -203,6 +215,10 @@ Routing rules:
 - Connection/unavailable/rate-limit failures may use an allowed fallback.
 - Once audio has been accepted, replay to another cloud requires the profile's
   explicit `BufferedWithConsent` policy.
+- Cancellation and connection loss after transport start may leave acceptance
+  ambiguous. `PossiblyAccepted` is treated like `Accepted`; uncertainty never
+  authorizes replay. Curl upload-byte evidence may prove `NotAccepted`, while a
+  successful provider response proves `Accepted`.
 - Parallel racing and result voting are future opt-in modes, never defaults.
 - The provider registry contains no dynamic library loading in version 0.x.
 
@@ -215,6 +231,8 @@ Every provider implementation must pass the same reusable tests:
 - bounded backpressure is respected;
 - partial/final ordering is normalized;
 - timeout and error categories are stable;
+- pre-transport, possible-upload, and accepted-audio failures retain accurate
+  lifecycle evidence for routing and usage accounting;
 - secrets and transcript content are redacted from normal diagnostics;
 - an empty or malformed provider response cannot become inserted text;
 - provider shutdown leaves the daemon ready for the next session.

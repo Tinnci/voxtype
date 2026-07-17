@@ -11,7 +11,7 @@ use std::sync::{
 };
 use std::thread;
 use std::time::Duration;
-use voxtype_core::{ErrorCategory, VoxError};
+use voxtype_core::{AudioAcceptance, ErrorCategory, ProviderAttemptFailure, VoxError};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Maximum provider response retained in memory.
@@ -22,7 +22,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 16 * 1024;
 const HTTP_STATUS_MARKER: &str = "VOXTYPE_HTTP_STATUS:";
-const CURL_WRITE_OUT: &str = "%{stderr}\nVOXTYPE_HTTP_STATUS:%{http_code}\n";
+const UPLOAD_BYTES_MARKER: &str = "VOXTYPE_UPLOAD_BYTES:";
+const CURL_WRITE_OUT: &str =
+    "%{stderr}\nVOXTYPE_HTTP_STATUS:%{http_code}\nVOXTYPE_UPLOAD_BYTES:%{size_upload}\n";
 
 /// Cheap cloneable cancellation flag shared by daemon and provider workers.
 #[derive(Clone, Debug, Default)]
@@ -109,6 +111,8 @@ pub struct CurlFailure {
     message: String,
     http_status: Option<u16>,
     curl_exit_code: Option<i32>,
+    transport_started: bool,
+    audio_acceptance: AudioAcceptance,
 }
 
 impl CurlFailure {
@@ -132,11 +136,41 @@ impl CurlFailure {
         self.curl_exit_code
     }
 
+    #[must_use]
+    pub const fn transport_started(&self) -> bool {
+        self.transport_started
+    }
+
+    #[must_use]
+    pub const fn audio_acceptance(&self) -> AudioAcceptance {
+        self.audio_acceptance
+    }
+
     /// Converts the transport failure into the application's stable error
     /// representation while preserving category and retryability.
     #[must_use]
     pub fn into_vox_error(self, code: &'static str) -> VoxError {
         VoxError::new(self.category, code, self.message).with_retryable(self.retryable)
+    }
+
+    /// Converts the transport failure while retaining replay and usage
+    /// lifecycle evidence.
+    #[must_use]
+    pub fn into_attempt_failure(self, code: &'static str) -> ProviderAttemptFailure {
+        let transport_started = self.transport_started;
+        let audio_acceptance = self.audio_acceptance;
+        let error = self.into_vox_error(code);
+        ProviderAttemptFailure {
+            error,
+            transport_started,
+            audio_acceptance,
+        }
+    }
+
+    fn with_transport_evidence(mut self, audio_acceptance: AudioAcceptance) -> Self {
+        self.transport_started = true;
+        self.audio_acceptance = audio_acceptance;
+        self
     }
 }
 
@@ -214,24 +248,32 @@ where
             None,
         )
     })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        failure(
-            ErrorCategory::Internal,
-            false,
-            "curl stdout is unavailable".to_owned(),
-            None,
-            None,
-        )
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        failure(
-            ErrorCategory::Internal,
-            false,
-            "curl stderr is unavailable".to_owned(),
-            None,
-            None,
-        )
-    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| {
+            failure(
+                ErrorCategory::Internal,
+                false,
+                "curl stdout is unavailable".to_owned(),
+                None,
+                None,
+            )
+        })
+        .map_err(|error| error.with_transport_evidence(AudioAcceptance::PossiblyAccepted))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| {
+            failure(
+                ErrorCategory::Internal,
+                false,
+                "curl stderr is unavailable".to_owned(),
+                None,
+                None,
+            )
+        })
+        .map_err(|error| error.with_transport_evidence(AudioAcceptance::PossiblyAccepted))?;
     let stdout_reader = thread::spawn(move || read_bounded(stdout, max_response_bytes));
     let stderr_reader = thread::spawn(move || read_bounded(stderr, MAX_STDERR_BYTES));
 
@@ -239,14 +281,40 @@ where
         || Some(io::Error::other("curl stdin is unavailable")),
         |mut stdin| stdin.write_all(private_config).err(),
     );
-    let (status, was_cancelled) = wait_for_curl(&mut child, cancellation)?;
-    let body = join_reader(stdout_reader, "stdout")?;
-    let diagnostics = join_reader(stderr_reader, "stderr")?;
+    let (status, was_cancelled) = wait_for_curl(&mut child, cancellation)
+        .map_err(|error| error.with_transport_evidence(AudioAcceptance::PossiblyAccepted))?;
+    let body = join_reader(stdout_reader, "stdout")
+        .map_err(|error| error.with_transport_evidence(AudioAcceptance::PossiblyAccepted))?;
+    let diagnostics = join_reader(stderr_reader, "stderr")
+        .map_err(|error| error.with_transport_evidence(AudioAcceptance::PossiblyAccepted))?;
+    finish_curl_attempt(
+        status,
+        was_cancelled,
+        body,
+        &diagnostics,
+        stdin_error,
+        max_response_bytes,
+    )
+}
+
+fn finish_curl_attempt(
+    status: std::process::ExitStatus,
+    was_cancelled: bool,
+    body: BoundedRead,
+    diagnostics: &BoundedRead,
+    stdin_error: Option<io::Error>,
+    max_response_bytes: usize,
+) -> Result<CurlResponse, CurlFailure> {
+    let curl_exit_code = status.code();
+    let audio_acceptance = classify_audio_acceptance(
+        parse_upload_bytes(&diagnostics.bytes),
+        curl_exit_code,
+        was_cancelled,
+    );
     if was_cancelled {
-        return Err(cancelled_failure());
+        return Err(cancelled_failure().with_transport_evidence(audio_acceptance));
     }
     let http_status = parse_http_status(&diagnostics.bytes);
-    let curl_exit_code = status.code();
     let diagnostic = sanitized_diagnostic(&diagnostics.bytes);
 
     if body.overflowed {
@@ -256,7 +324,8 @@ where
             format!("provider response exceeded {max_response_bytes} bytes"),
             http_status,
             curl_exit_code,
-        ));
+        )
+        .with_transport_evidence(audio_acceptance));
     }
 
     if let Some(error) = stdin_error {
@@ -266,7 +335,8 @@ where
             format!("could not provide curl request credentials: {error}"),
             http_status,
             curl_exit_code,
-        ));
+        )
+        .with_transport_evidence(audio_acceptance));
     }
 
     if !status.success() {
@@ -275,7 +345,8 @@ where
             http_status,
             diagnostic.as_deref(),
             max_response_bytes,
-        ));
+        )
+        .with_transport_evidence(audio_acceptance));
     }
 
     let Some(http_status) = http_status else {
@@ -285,14 +356,14 @@ where
             "curl completed without an HTTP status".to_owned(),
             None,
             curl_exit_code,
-        ));
+        )
+        .with_transport_evidence(audio_acceptance));
     };
     if !(200..300).contains(&http_status) {
-        return Err(classify_http_failure(
-            http_status,
-            curl_exit_code,
-            diagnostic.as_deref(),
-        ));
+        return Err(
+            classify_http_failure(http_status, curl_exit_code, diagnostic.as_deref())
+                .with_transport_evidence(audio_acceptance),
+        );
     }
 
     Ok(CurlResponse {
@@ -428,12 +499,47 @@ fn parse_http_status(stderr: &[u8]) -> Option<u16> {
     })
 }
 
+fn parse_upload_bytes(stderr: &[u8]) -> Option<u64> {
+    let diagnostics = String::from_utf8_lossy(stderr);
+    diagnostics.lines().rev().find_map(|line| {
+        line.trim()
+            .strip_prefix(UPLOAD_BYTES_MARKER)
+            .and_then(|value| value.split('.').next())
+            .and_then(|value| value.parse::<u64>().ok())
+    })
+}
+
+fn classify_audio_acceptance(
+    uploaded_bytes: Option<u64>,
+    curl_exit_code: Option<i32>,
+    was_cancelled: bool,
+) -> AudioAcceptance {
+    if uploaded_bytes.is_some_and(|bytes| bytes > 0) {
+        return if curl_exit_code == Some(0) {
+            AudioAcceptance::Accepted
+        } else {
+            AudioAcceptance::PossiblyAccepted
+        };
+    }
+    if uploaded_bytes == Some(0)
+        || (!was_cancelled && matches!(curl_exit_code, Some(5 | 6 | 7 | 35 | 60)))
+    {
+        AudioAcceptance::NotAccepted
+    } else {
+        AudioAcceptance::PossiblyAccepted
+    }
+}
+
 fn sanitized_diagnostic(stderr: &[u8]) -> Option<String> {
     let diagnostics = String::from_utf8_lossy(stderr);
     diagnostics
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with(HTTP_STATUS_MARKER))
+        .find(|line| {
+            !line.is_empty()
+                && !line.starts_with(HTTP_STATUS_MARKER)
+                && !line.starts_with(UPLOAD_BYTES_MARKER)
+        })
         .map(|line| line.chars().take(300).collect())
 }
 
@@ -556,6 +662,8 @@ fn failure(
         message,
         http_status,
         curl_exit_code,
+        transport_started: false,
+        audio_acceptance: AudioAcceptance::NotAccepted,
     }
 }
 
@@ -682,5 +790,31 @@ mod tests {
         .expect_err("pre-cancelled transport must fail");
         assert_eq!(error.category(), ErrorCategory::Cancelled);
         assert!(!error.is_retryable());
+        assert!(!error.transport_started());
+        assert_eq!(error.audio_acceptance(), AudioAcceptance::NotAccepted);
+    }
+
+    #[test]
+    fn upload_evidence_is_conservative() {
+        assert_eq!(
+            parse_upload_bytes(b"detail\nVOXTYPE_UPLOAD_BYTES:684\n"),
+            Some(684)
+        );
+        assert_eq!(
+            classify_audio_acceptance(Some(684), Some(0), false),
+            AudioAcceptance::Accepted
+        );
+        assert_eq!(
+            classify_audio_acceptance(Some(12), Some(56), false),
+            AudioAcceptance::PossiblyAccepted
+        );
+        assert_eq!(
+            classify_audio_acceptance(Some(0), Some(7), false),
+            AudioAcceptance::NotAccepted
+        );
+        assert_eq!(
+            classify_audio_acceptance(None, None, true),
+            AudioAcceptance::PossiblyAccepted
+        );
     }
 }
