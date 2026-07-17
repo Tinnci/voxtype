@@ -17,6 +17,7 @@ type MenuLayout = (u32, i32, MenuProperties, Vec<MenuNode>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TrayPresentation {
+    daemon_state: String,
     status: &'static str,
     icon_name: &'static str,
 }
@@ -24,27 +25,36 @@ struct TrayPresentation {
 impl TrayPresentation {
     fn from_daemon_status(status: &str) -> Self {
         match status {
-            "preparing" => Self::active("microphone-sensitivity-medium"),
-            "listening" => Self::attention("microphone-sensitivity-high"),
-            "finalizing" => Self::active("content-loading"),
-            "inserting" => Self::active("insert-text"),
-            "unavailable" => Self::attention("dialog-error"),
-            _ => Self::active("audio-input-microphone"),
+            "preparing" => Self::active(status, "microphone-sensitivity-medium"),
+            "listening" => Self::attention(status, "microphone-sensitivity-high"),
+            "finalizing" => Self::active(status, "content-loading"),
+            "inserting" => Self::active(status, "insert-text"),
+            "unavailable" => Self::attention(status, "dialog-error"),
+            _ => Self::active(status, "audio-input-microphone"),
         }
     }
 
-    const fn active(icon_name: &'static str) -> Self {
+    fn active(daemon_state: &str, icon_name: &'static str) -> Self {
         Self {
+            daemon_state: daemon_state.to_owned(),
             status: "Active",
             icon_name,
         }
     }
 
-    const fn attention(icon_name: &'static str) -> Self {
+    fn attention(daemon_state: &str, icon_name: &'static str) -> Self {
         Self {
+            daemon_state: daemon_state.to_owned(),
             status: "NeedsAttention",
             icon_name,
         }
+    }
+
+    fn is_busy(&self) -> bool {
+        matches!(
+            self.daemon_state.as_str(),
+            "preparing" | "listening" | "finalizing" | "inserting"
+        )
     }
 }
 
@@ -125,7 +135,19 @@ impl TrayItem {
     async fn new_icon(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
 
-struct TrayMenu;
+#[derive(Clone)]
+struct TrayMenu {
+    presentation: Arc<RwLock<TrayPresentation>>,
+}
+
+impl TrayMenu {
+    fn presentation(&self) -> TrayPresentation {
+        self.presentation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
 
 #[zbus::interface(name = "com.canonical.dbusmenu")]
 #[allow(clippy::unused_self)]
@@ -137,7 +159,12 @@ impl TrayMenu {
         property_names: Vec<String>,
     ) -> MenuLayout {
         let _ = (recursion_depth, property_names);
-        (1, parent_id, HashMap::new(), menu_children())
+        (
+            1,
+            parent_id,
+            HashMap::new(),
+            menu_children(&self.presentation()),
+        )
     }
 
     fn about_to_show(&self, id: i32) -> bool {
@@ -148,6 +175,9 @@ impl TrayMenu {
     fn event(&self, id: i32, event_id: &str, data: OwnedValue, timestamp: u32) {
         let _ = (data, timestamp);
         if event_id != "clicked" {
+            return;
+        }
+        if !menu_item_enabled(id, &self.presentation()) {
             return;
         }
         match id {
@@ -200,9 +230,16 @@ impl TrayMenu {
             _ => {}
         }
     }
+
+    #[zbus(signal, name = "LayoutUpdated")]
+    async fn layout_updated(
+        emitter: &SignalEmitter<'_>,
+        revision: u32,
+        parent: i32,
+    ) -> zbus::Result<()>;
 }
 
-fn menu_children() -> Vec<MenuNode> {
+fn menu_children(presentation: &TrayPresentation) -> Vec<MenuNode> {
     #[allow(clippy::redundant_closure_for_method_calls)]
     let usage_label = with_client(|client| client.usage_status()).map_or_else(
         |_| "用量：不可用".to_owned(),
@@ -211,8 +248,8 @@ fn menu_children() -> Vec<MenuNode> {
     [
         (1, "开始语音输入".to_owned()),
         (2, "停止语音输入".to_owned()),
-        (3, "取消当前录音".to_owned()),
-        (4, "检查最近输入的语法".to_owned()),
+        (3, "取消当前任务".to_owned()),
+        (4, "整理最近输入".to_owned()),
         (5, usage_label),
         (6, "设置与 API 密钥".to_owned()),
         (7, "诊断状态".to_owned()),
@@ -226,9 +263,23 @@ fn menu_children() -> Vec<MenuNode> {
             OwnedValue::try_from(Value::from(label))
                 .expect("static menu labels are valid D-Bus values"),
         );
+        properties.insert(
+            "enabled".to_owned(),
+            OwnedValue::try_from(Value::from(menu_item_enabled(id, presentation)))
+                .expect("menu enabled state is a valid D-Bus value"),
+        );
         (id, properties, Vec::new())
     })
     .collect()
+}
+
+fn menu_item_enabled(id: i32, presentation: &TrayPresentation) -> bool {
+    match id {
+        1 => presentation.daemon_state != "unavailable" && !presentation.is_busy(),
+        2 => presentation.daemon_state == "listening",
+        3 => presentation.is_busy(),
+        _ => true,
+    }
 }
 
 fn usage_summary(status: &str) -> String {
@@ -299,7 +350,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 presentation: Arc::clone(&presentation),
             },
         )?
-        .serve_at(MENU_PATH, TrayMenu)?
+        .serve_at(
+            MENU_PATH,
+            TrayMenu {
+                presentation: Arc::clone(&presentation),
+            },
+        )?
         .build()?;
     let watcher = Proxy::new(
         &connection,
@@ -351,8 +407,10 @@ fn emit_presentation_change(
             item.icon_name_changed(&emitter).await?;
             TrayItem::new_icon(&emitter).await?;
         }
-        Ok(())
-    })
+        Ok::<(), zbus::Error>(())
+    })?;
+    let menu_emitter = SignalEmitter::new(connection.inner(), MENU_PATH)?;
+    zbus::block_on(TrayMenu::layout_updated(&menu_emitter, 1, 0))
 }
 
 #[cfg(test)]
@@ -378,6 +436,27 @@ mod tests {
         let state = TrayPresentation::from_daemon_status("unavailable");
         assert_eq!(state.status, "NeedsAttention");
         assert_eq!(state.icon_name, "dialog-error");
+    }
+
+    #[test]
+    fn menu_actions_follow_daemon_state() {
+        let idle = TrayPresentation::from_daemon_status("idle");
+        assert!(menu_item_enabled(1, &idle));
+        assert!(!menu_item_enabled(2, &idle));
+        assert!(!menu_item_enabled(3, &idle));
+
+        let listening = TrayPresentation::from_daemon_status("listening");
+        assert!(!menu_item_enabled(1, &listening));
+        assert!(menu_item_enabled(2, &listening));
+        assert!(menu_item_enabled(3, &listening));
+
+        let processing = TrayPresentation::from_daemon_status("finalizing");
+        assert!(!menu_item_enabled(1, &processing));
+        assert!(!menu_item_enabled(2, &processing));
+        assert!(menu_item_enabled(3, &processing));
+
+        let unavailable = TrayPresentation::from_daemon_status("unavailable");
+        assert!(!menu_item_enabled(1, &unavailable));
     }
 
     #[test]
