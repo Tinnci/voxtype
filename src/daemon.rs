@@ -346,7 +346,7 @@ impl VoxTypeDaemon {
             }
         }
 
-        match Recording::start() {
+        match Recording::start_with_device(Some(self.config.audio.device.as_str())) {
             Ok(recording) => {
                 self.recording = Some(recording);
                 self.recording_started_at = Some(Instant::now());

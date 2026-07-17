@@ -7,16 +7,20 @@ is never evidence of ASR quality or desktop delivery correctness.
 ## Layer 0: session policy and orchestration
 
 Owns session IDs, state transitions, cancellation, provider routing, replay
-consent, usage semantics, and stale-result rejection. The next production step
-is to replace the daemon's synchronous `PreparedProvider` dispatch with a
-bounded background job and connect the core router to real lifecycle states:
-prepared, request started, audio accepted, completed, and cancelled.
-Provider execution is now off the D-Bus object lock with session-checked result
-delivery and cancellable curl/command children. Provider failures carry
+consent, usage semantics, and stale-result rejection. Provider execution is now
+off the D-Bus object lock with session-checked result delivery and cancellable
+curl/command children. Provider failures carry
 transport-started plus conservative `NotAccepted`, `PossiblyAccepted`, or
 `Accepted` evidence. Fallback and usage accounting no longer infer audio
 exposure from the provider type; ambiguous cancellation or connection loss
 requires explicit buffered replay consent.
+
+The remaining boundary issue is that the running daemon still dispatches a
+configuration enum instead of the reusable core provider trait/registry. The
+next orchestration increment is a single `ProviderAdapter` contract returning
+an attempt outcome with lifecycle evidence, followed by a bounded event queue
+that emits every state transition rather than reconstructing transitions from
+a 100 ms snapshot.
 
 ## Layer 1: capture and speech signal processing
 
@@ -64,8 +68,10 @@ when Fcitx is unavailable. Clipboard plus `ydotool` remains an explicit unsafe
 compatibility choice and is not a daemon service dependency.
 The daemon emits `StateChanged(state, session)` lifecycle events. The tray uses
 them for normal SNI icon/status and dbusmenu action updates, while a five-second
-status read remains only as disconnect/reconnect protection. Plasma therefore
-does not offer Start, Stop, and Cancel simultaneously.
+status read remains only as disconnect/reconnect protection. The current signal
+adapter compares 100 ms snapshots, however, so short `finalizing` or `inserting`
+states can be lost. State-machine effects must feed an ordered bounded event
+queue before this integration can claim complete lifecycle delivery.
 
 ## Layer 4: user experience, configuration, and diagnostics
 
@@ -108,6 +114,15 @@ Work packages 1 and 2 define the interfaces and can proceed in parallel. Work
 packages 3 and 4 build against those lifecycle events. Package 5 continuously
 adds acceptance evidence rather than waiting until the end.
 
+The current audit delegated ownership as follows:
+
+- Provider/runtime: attempt lifecycle, cancellation, fallback, usage, quota,
+  provider registry, and production isolation of the deterministic provider.
+- Capture/DSP: device selection, online PCM frames, VAD, endpointing,
+  calibration, clipping/SNR metrics, and hot-plug behavior.
+- Desktop/UX: ordered D-Bus events, final session outcome, Fcitx context and
+  idempotent commit, push-to-talk, overlay telemetry, and reviewable cleanup UI.
+
 ## Mock replacement inventory
 
 Replace a double only when it can affect a normal user path. Keep deterministic
@@ -123,6 +138,14 @@ doubles at protocol and process boundaries so failure behavior remains testable.
   is disabled. Retaining prior input requires an explicit privacy decision.
 - Any provider `success` must come from a parsed non-empty provider response or
   a real local command result, never a generated sample string.
+- Provider readiness must not call a configured secret or an untripped circuit
+  breaker "available". Only a successful request or explicit provider probe may
+  produce a time-bounded verified state; providers without a free probe remain
+  `configured, unverified`.
+- D-Bus must expose an ordered final session outcome. `Stop` returning
+  `result=processing` is only acceptance, not recognition success; clients need
+  a single completion/failure/cancel event and stable error code without
+  requiring transcript history.
 
 ### P1: replace approximations with truthful production algorithms
 
@@ -130,11 +153,13 @@ doubles at protocol and process boundaries so failure behavior remains testable.
   stream with negotiated device identity, bounded buffers, drop accounting,
   resampling, and hot-plug recovery.
 - Keep the stateful energy VAD, but add DC rejection, independently smoothed
-  short/long energy, calibrated SNR confidence, and live endpoint events. This
-  is an algorithm improvement, not replacement of a mock.
+  short/long energy, speech-band evidence, calibrated SNR hysteresis, and live
+  endpoint events. Feed the recording UI and final trim from the same streaming
+  detector. This is an algorithm improvement, not replacement of a mock.
 - Present `grammar.rs` as local typography/text cleanup. A feature called full
-semantic grammar checking needs a separate pluggable local or online checker plus a
-  review/apply/undo flow; heuristics must not be labelled as semantic grammar.
+  semantic grammar checking needs a separate pluggable local or online checker
+  plus a review/apply/undo flow. Cleanup must return Unicode-safe span edits;
+  repeated-word and capitalization rules require explicit acceptance.
 - The overlay is now a persistent QML process backed by a 0600 runtime state
   file. Daemon updates arrive through bounded stdin JSON and the QML view
   refreshes in place; state text is no longer placed in a process argv. It still
@@ -144,7 +169,16 @@ semantic grammar checking needs a separate pluggable local or online checker plu
   limits as local soft limits. Provider account balance or billing quota may be
   shown only when fetched from an authoritative provider API with provenance.
 - Replace calibration's single mixed sample with guided silence and speech
-  phases that calculate noise, speech RMS, SNR, clipping ratio, and confidence.
+  phases that calculate noise distributions, speech RMS, SNR, clipped-sample
+  ratio, threshold confidence, and device identity. Low-confidence results must
+  not enable one-click application.
+- Replace KGlobalAccel launcher pairs with a press/release-capable portal or KDE
+  adapter for true push-to-talk. Separate Start/Stop actions remain useful but
+  are not push-to-talk.
+- Replace the Fcitx datagram's timeout-based delivery assumption with a
+  versioned, bounded, idempotent request protocol. Surrounding text, cursor,
+  selection, capabilities, and focus generation are required before checking
+  text that predates VoxType's private transcript history.
 
 ### Keep as test doubles
 

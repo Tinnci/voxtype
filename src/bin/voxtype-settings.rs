@@ -179,7 +179,7 @@ fn route(request: &Request<'_>) -> io::Result<Response> {
 
 fn calibrate_microphone() -> io::Result<Response> {
     let config = Config::load_or_create().map_err(domain_io)?;
-    let recording = Recording::start()?;
+    let recording = Recording::start_with_device(Some(config.audio.device.as_str()))?;
     thread::sleep(Duration::from_millis(2_500));
     let recording = recording.stop()?;
     let result = vad::analyze_file(
@@ -261,6 +261,7 @@ fn settings_state() -> io::Result<Value> {
             "retain_recordings": config.desktop.retain_recordings,
             "transcript_history_enabled": config.desktop.transcript_history_enabled,
             "vad_enabled": config.audio.vad_enabled,
+            "audio_device": config.audio.device,
             "vad_rms_threshold": config.audio.vad_rms_threshold,
             "vad_minimum_voiced_frames": config.audio.vad_minimum_voiced_frames,
             "minimum_duration_millis": config.audio.minimum_duration_millis,
@@ -474,6 +475,7 @@ fn empty_usage() -> Value {
 #[allow(clippy::struct_excessive_bools)] // Mirrors independent settings checkboxes in the wire payload.
 struct GeneralUpdate {
     default_profile: String,
+    audio_device: String,
     insertion_backend: String,
     restore_clipboard: bool,
     retain_recordings: bool,
@@ -489,6 +491,10 @@ fn save_general(body: &[u8]) -> io::Result<Response> {
     let update: GeneralUpdate = serde_json::from_slice(body).map_err(invalid_input)?;
     let mut config = Config::load_or_create().map_err(domain_io)?;
     config.default_profile = update.default_profile;
+    update
+        .audio_device
+        .trim()
+        .clone_into(&mut config.audio.device);
     config.desktop.insertion_backend = match update.insertion_backend.as_str() {
         "fcitx" => InsertionBackend::Fcitx,
         "clipboard" => InsertionBackend::Clipboard,

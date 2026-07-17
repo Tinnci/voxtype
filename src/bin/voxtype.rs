@@ -327,7 +327,7 @@ fn doctor_provider() -> Result<(), Box<dyn Error>> {
 fn doctor_audio() -> Result<(), Box<dyn Error>> {
     require_idle_daemon("audio doctor")?;
     let config = Config::load_or_create()?;
-    let recording = Recording::start()?;
+    let recording = Recording::start_with_device(Some(config.audio.device.as_str()))?;
     std::thread::sleep(std::time::Duration::from_millis(500));
     let result = recording.stop()?;
     let vad = vad::analyze_file(

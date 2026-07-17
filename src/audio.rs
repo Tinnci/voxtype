@@ -33,9 +33,19 @@ impl Recording {
     /// Returns an I/O error if the runtime directory/file cannot be created or
     /// no `PipeWire` capture command can be started.
     pub fn start() -> io::Result<Self> {
+        Self::start_with_device(None)
+    }
+
+    /// Starts capture from an optional `PipeWire` node name/target.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if the runtime recording file or capture process
+    /// cannot be created.
+    pub fn start_with_device(device: Option<&str>) -> io::Result<Self> {
         let path = recording_path()?;
         let mut output = File::create(&path)?;
-        let (backend, mut command) = capture_command();
+        let (backend, mut command) = capture_command(device);
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -154,34 +164,50 @@ fn recording_path() -> io::Result<PathBuf> {
     Ok(directory.join(format!("recording-{}-{timestamp}.pcm", std::process::id())))
 }
 
-fn capture_command() -> (&'static str, Command) {
+fn capture_command(device: Option<&str>) -> (&'static str, Command) {
     if command_exists("pw-record") {
-        return ("pw-record", {
-            let mut command = Command::new("pw-record");
-            command.args([
-                "--raw",
-                "--format=s16",
-                "--rate=16000",
-                "--channels=1",
-                "--media-category=Capture",
-                "--media-role=Communication",
-                "--latency=20ms",
-                "-",
-            ]);
-            command
-        });
+        return ("pw-record", pipewire_command(device));
     }
+    ("parec", pulseaudio_command(device))
+}
+
+fn pipewire_command(device: Option<&str>) -> Command {
+    let mut command = Command::new("pw-record");
+    command.args([
+        "--raw",
+        "--format=s16",
+        "--rate=16000",
+        "--channels=1",
+        "--media-category=Capture",
+        "--media-role=Communication",
+        "--latency=20ms",
+    ]);
+    if let Some(device) = configured_device(device) {
+        command.args(["--target", device]);
+    }
+    command.arg("-");
+    command
+}
+
+fn pulseaudio_command(device: Option<&str>) -> Command {
     let mut command = Command::new("parec");
     command.args([
         "--raw",
         "--format=s16le",
         "--rate=16000",
         "--channels=1",
-        "--device=@DEFAULT_SOURCE@",
         "--latency-msec=20",
         "--process-time-msec=20",
     ]);
-    ("parec", command)
+    command.arg(format!(
+        "--device={}",
+        configured_device(device).unwrap_or("@DEFAULT_SOURCE@")
+    ));
+    command
+}
+
+fn configured_device(device: Option<&str>) -> Option<&str> {
+    device.map(str::trim).filter(|value| !value.is_empty())
 }
 
 fn command_exists(command: &str) -> bool {
@@ -225,12 +251,36 @@ mod tests {
 
     #[test]
     fn prefers_native_pipewire_capture_when_available() {
-        let (backend, _command) = capture_command();
+        let (backend, _command) = capture_command(None);
         if command_exists("pw-record") {
             assert_eq!(backend, "pw-record");
         } else {
             assert_eq!(backend, "parec");
         }
+    }
+
+    #[test]
+    fn places_pipewire_target_before_stdout_path() {
+        let command = pipewire_command(Some("alsa_input.test"));
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &args[args.len() - 3..],
+            ["--target", "alsa_input.test", "-"]
+        );
+    }
+
+    #[test]
+    fn selects_one_pulseaudio_device() {
+        let command = pulseaudio_command(Some(" source.test "));
+        let devices = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .filter(|arg| arg.starts_with("--device="))
+            .collect::<Vec<_>>();
+        assert_eq!(devices, ["--device=source.test"]);
     }
 
     #[test]

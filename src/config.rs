@@ -87,6 +87,7 @@ pub enum InsertionBackend {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AudioConfig {
+    pub device: String,
     pub minimum_duration_millis: u64,
     pub maximum_duration_seconds: u64,
     pub vad_enabled: bool,
@@ -97,6 +98,7 @@ pub struct AudioConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
+            device: String::new(),
             minimum_duration_millis: 250,
             maximum_duration_seconds: 120,
             vad_enabled: true,
@@ -292,6 +294,11 @@ impl Config {
         if self.audio.vad_rms_threshold == 0 || self.audio.vad_rms_threshold > 10_000 {
             return Err(configuration(
                 "VAD RMS threshold must be between 1 and 10000",
+            ));
+        }
+        if self.audio.device.len() > 256 || self.audio.device.chars().any(char::is_control) {
+            return Err(configuration(
+                "audio device target must be at most 256 characters and contain no controls",
             ));
         }
         if !(5..=3_600).contains(&self.audio.maximum_duration_seconds) {
@@ -592,6 +599,22 @@ mod tests {
         config.audio.maximum_duration_seconds = 4;
         assert!(config.validate().is_err());
         config.audio.maximum_duration_seconds = 3_601;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_and_round_trips_audio_device() {
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        config.audio.device = "alsa_input.usb-microphone".to_owned();
+        config.validate().expect("audio device validates");
+
+        let serialized = toml::to_string_pretty(&config).expect("configuration serializes");
+        let round_trip: Config = toml::from_str(&serialized).expect("configuration parses again");
+        assert_eq!(round_trip.audio.device, "alsa_input.usb-microphone");
+
+        config.audio.device = "bad\ndevice".to_owned();
+        assert!(config.validate().is_err());
+        config.audio.device = "x".repeat(257);
         assert!(config.validate().is_err());
     }
 

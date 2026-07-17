@@ -325,6 +325,22 @@ ApplicationWindow {
                                 currentIndex: root.state ? model.indexOf(root.state.general.default_profile) : -1
                             }
 
+                            Label { text: qsTr("录音设备") }
+                            TrackedTextField {
+                                id: audioDevice
+                                Layout.fillWidth: true
+                                text: root.state ? root.state.general.audio_device : ""
+                                placeholderText: qsTr("留空使用系统默认输入设备")
+                            }
+
+                            Item { Layout.preferredWidth: 1 }
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("可填写 PipeWire 节点名或 PulseAudio source 名称；修改后会同时用于录音、校准和音频诊断。")
+                                wrapMode: Text.Wrap
+                                opacity: 0.65
+                            }
+
                             Label { text: qsTr("文本注入后端") }
                             ComboBox {
                                 id: backendBox
@@ -511,6 +527,7 @@ ApplicationWindow {
                             onClicked: {
                                 const payload = {
                                     default_profile: profileBox.currentText,
+                                    audio_device: audioDevice.text,
                                     insertion_backend: backendBox.currentText,
                                     restore_clipboard: restoreClipboard.checked,
                                     retain_recordings: retainRecordings.checked,
