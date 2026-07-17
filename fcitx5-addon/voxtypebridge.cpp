@@ -230,7 +230,7 @@ private:
                     pendingContext == instance_->lastFocusedInputContext() &&
                     !isSecure(pendingContext)) {
                     pendingContext->commitString(pendingText);
-                    result = response("OK", "committed");
+                    result = response("OK", "dispatched");
                 } else if (pendingContext && isSecure(pendingContext)) {
                     result = response("ERR", "secure-context");
                 } else {

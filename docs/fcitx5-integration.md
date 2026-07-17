@@ -11,9 +11,9 @@ stable native addon API is C++.
 - records the currently focused Fcitx `InputContext` at `ARM`;
 - rejects Password/Sensitive contexts;
 - rechecks focus, context identity, and secure flags before committing;
-- acknowledges success only after the deferred `commitString` call actually
-  passes its final focus/security check, so the daemon cannot record a queued
-  but silently dropped insertion as successful;
+- acknowledges dispatch only after the deferred `commitString` call passes its
+  final focus/security check. This proves delivery to the Fcitx input-context
+  API, not that a target widget rendered or retained the text;
 - defers `commitString` to the next Fcitx event-loop turn;
 - never performs audio capture, network access, secret lookup, or clipboard work.
 - exposes one standard Fcitx external-config action that launches
@@ -66,8 +66,9 @@ voxtype fcitx-insert-test 'VoxType Fcitx 原生提交测试'
 ```
 
 The command uses the native bridge only. It does not mutate the clipboard or
-fall back to synthetic paste. `queued=true` proves bridge acceptance; the text
-appearing in the focused field is the required frontend delivery evidence.
+fall back to synthetic paste. `dispatched=true` proves the final Fcitx call ran;
+the text appearing in the focused field is the required frontend delivery
+evidence.
 
 ## Backend selection
 

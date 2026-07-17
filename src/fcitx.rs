@@ -62,7 +62,7 @@ impl FcitxBridge {
         Ok(target)
     }
 
-    /// Arms and queues a diagnostic commit for the currently focused context.
+    /// Arms and dispatches a diagnostic commit to the currently focused context.
     ///
     /// # Errors
     ///
@@ -92,7 +92,7 @@ impl FcitxBridge {
     /// addon transport failure. Callers must not silently fall back after this.
     pub fn commit(self, session: &SessionId, text: &str) -> Result<(), VoxError> {
         let response = request(&[b"COMMIT", session.as_str().as_bytes(), text.as_bytes()])?;
-        expect_committed(&response)
+        expect_dispatched(&response)
     }
 
     /// Clears any armed input context for the session.
@@ -186,16 +186,16 @@ fn expect_ok(response: &[u8]) -> Result<(), VoxError> {
     ))
 }
 
-fn expect_committed(response: &[u8]) -> Result<(), VoxError> {
+fn expect_dispatched(response: &[u8]) -> Result<(), VoxError> {
     expect_ok(response)?;
     let detail = response.split(|byte| *byte == 0).nth(1).unwrap_or_default();
-    if detail == b"committed" {
+    if matches!(detail, b"dispatched" | b"committed") {
         Ok(())
     } else {
         Err(VoxError::new(
             ErrorCategory::Protocol,
-            "fcitx.commit_unconfirmed",
-            "Fcitx bridge did not confirm the text commit",
+            "fcitx.dispatch_unconfirmed",
+            "Fcitx bridge did not confirm dispatch to the input context",
         ))
     }
 }
@@ -247,10 +247,11 @@ mod tests {
     }
 
     #[test]
-    fn commit_requires_final_confirmation() {
-        expect_committed(b"OK\0committed").expect("confirmed commit");
-        let error = expect_committed(b"OK\0queued").expect_err("queued is not committed");
-        assert_eq!(error.code(), "fcitx.commit_unconfirmed");
+    fn commit_requires_final_dispatch_confirmation() {
+        expect_dispatched(b"OK\0dispatched").expect("confirmed dispatch");
+        expect_dispatched(b"OK\0committed").expect("accept previous addon during upgrade");
+        let error = expect_dispatched(b"OK\0queued").expect_err("queued is not dispatched");
+        assert_eq!(error.code(), "fcitx.dispatch_unconfirmed");
     }
 
     #[test]

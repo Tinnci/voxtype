@@ -823,13 +823,13 @@ impl VoxTypeDaemon {
                 3_000,
             );
         } else {
-            notify("VoxType", "Dictation inserted");
+            notify("VoxType", "Dictation dispatched");
             let detail = if self.config.desktop.transcript_history_enabled {
-                "Meta+Alt+G checks recent text"
+                "Sent to the focused input path · Meta+Alt+G checks recent text"
             } else {
-                "Transcript history is off"
+                "Sent to the focused input path · transcript history is off"
             };
-            overlay("done", "Text inserted", detail, 2_000);
+            overlay("done", "Text dispatched", detail, 2_000);
         }
         Ok(format!(
             "session={session} provider={provider_id} chars={} backend={} clipboard_restored={} vad={}",

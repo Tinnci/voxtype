@@ -134,7 +134,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             let text = arguments.collect::<Vec<_>>().join(" ");
             let target = FcitxBridge.commit_test(&text)?;
             println!(
-                "queued=true program={} frontend={}",
+                "dispatched=true program={} frontend={}",
                 target.program, target.frontend
             );
         }
