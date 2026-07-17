@@ -39,6 +39,9 @@ configuration and redirects, captures numeric HTTP status independently from
 the response body, limits response/diagnostic memory, and maps curl exit codes
 into timeout, connection, authentication, rate-limit, and protocol categories.
 Authorization material still enters through private stdin configuration.
+The same runner owns a cloneable atomic cancellation token, polls the child
+without an async runtime, and always kills and reaps curl when a session is
+cancelled.
 
 ## Dependency acceptance checklist
 

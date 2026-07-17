@@ -2,7 +2,10 @@
 
 use crate::{
     audio::{Recording, RecordingResult, cleanup_stale_recordings},
-    config::{Config, InsertionBackend, ProviderConfig, lookup_deepgram_secret, lookup_secret},
+    config::{
+        Config, InsertionBackend, ProfileConfig, ProviderConfig, lookup_deepgram_secret,
+        lookup_secret,
+    },
     desktop::ClipboardInserter,
     fcitx::FcitxBridge,
     grammar,
@@ -10,16 +13,27 @@ use crate::{
 };
 use std::collections::VecDeque;
 use std::fs;
+use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
+use std::sync::{
+    Mutex,
+    mpsc::{Receiver, TryRecvError, sync_channel},
+};
+use std::thread;
 use std::time::{Duration, Instant};
 use voxtype_core::{
     Command, CommandEffect, ErrorCategory, ReplayPolicy, SessionId, SessionMachine, StartRequest,
     TriggerMode, VoxError,
 };
-use voxtype_provider_deepgram::{DeepgramConfig, transcribe_pcm as transcribe_deepgram_pcm};
-use voxtype_provider_rest::{ApiUsage, RestProviderConfig, transcribe_pcm};
+use voxtype_provider_common::CancellationToken;
+use voxtype_provider_deepgram::{
+    DeepgramConfig, transcribe_pcm_cancellable as transcribe_deepgram_pcm,
+};
+use voxtype_provider_rest::{
+    ApiUsage, RestProviderConfig, transcribe_pcm_cancellable as transcribe_pcm,
+};
 use zbus::fdo;
 
 #[derive(Debug)]
@@ -34,6 +48,7 @@ pub struct VoxTypeDaemon {
     provider_usage: std::collections::BTreeMap<String, ProviderUsageState>,
     transcript_history: VecDeque<String>,
     recording_started_at: Option<Instant>,
+    recognition_job: Option<RecognitionJob>,
     quit: bool,
 }
 
@@ -94,6 +109,35 @@ enum VoiceActivity {
         audio_millis: u64,
     },
     NoSpeech(String),
+}
+
+#[derive(Debug)]
+struct RecognitionJob {
+    session: SessionId,
+    cancellation: CancellationToken,
+    receiver: Mutex<Receiver<RecognitionWorkerResult>>,
+    recording_path: std::path::PathBuf,
+    vad_result: Option<VadResult>,
+    audio_millis: u64,
+}
+
+#[derive(Debug)]
+struct RecognitionWorkerResult {
+    attempts: Vec<ProviderAttemptReport>,
+    outcome: Result<RecognitionSuccess, VoxError>,
+}
+
+#[derive(Debug)]
+struct RecognitionSuccess {
+    provider_id: String,
+    transcript: ProviderTranscript,
+}
+
+#[derive(Debug)]
+struct ProviderAttemptReport {
+    provider_id: String,
+    request_started: bool,
+    error: Option<VoxError>,
 }
 
 impl ProviderHealthState {
@@ -243,10 +287,16 @@ impl VoxTypeDaemon {
         if self.recording.is_some() {
             return Err(fdo::Error::Failed("recording is already active".to_owned()));
         }
-        let (profile_name, _profile) = self
+        let (profile_name, selected_profile) = self
             .config
             .profile((!profile.is_empty()).then_some(profile))
             .ok_or_else(|| fdo::Error::InvalidArgs(format!("unknown profile: {profile}")))?;
+        if profile.is_empty() && profile_is_demo_only(&self.config, selected_profile) {
+            return Err(fdo::Error::Failed(
+                "the default profile only contains fixed-text demo providers; configure a real ASR provider in VoxType Settings, or pass the demo profile explicitly for integration testing"
+                    .to_owned(),
+            ));
+        }
         let profile_name = profile_name.to_owned();
         let request = StartRequest {
             mode: TriggerMode::Toggle,
@@ -264,11 +314,7 @@ impl VoxTypeDaemon {
             InsertionBackend::Fcitx => FcitxBridge.arm(&session).map(|()| ArmedInsertion::Fcitx),
             InsertionBackend::Clipboard => Ok(ArmedInsertion::Clipboard),
             InsertionBackend::Copy => Ok(ArmedInsertion::Copy),
-            InsertionBackend::Auto => match FcitxBridge.arm(&session) {
-                Ok(()) => Ok(ArmedInsertion::Fcitx),
-                Err(error) if may_auto_fallback_from_fcitx(&error) => Ok(ArmedInsertion::Clipboard),
-                Err(error) => Err(error),
-            },
+            InsertionBackend::Auto => select_auto_insertion(FcitxBridge.arm(&session)),
         };
         match armed {
             Ok(armed) => self.armed_insertion = Some(armed),
@@ -340,15 +386,17 @@ impl VoxTypeDaemon {
             "Running VAD and recognition",
             0,
         );
-        let response = self.finish_recognition(&active, &result);
+        let response = self.begin_recognition(&active, &result);
         if response.is_err() && self.armed_insertion == Some(ArmedInsertion::Fcitx) {
             FcitxBridge.cancel(&active);
         }
-        if !self.config.desktop.retain_recordings {
+        if self.recognition_job.is_none() && !self.config.desktop.retain_recordings {
             let _result = fs::remove_file(&result.path);
         }
-        self.active_profile = None;
-        self.armed_insertion = None;
+        if self.recognition_job.is_none() {
+            self.active_profile = None;
+            self.armed_insertion = None;
+        }
         response
     }
 
@@ -369,6 +417,10 @@ impl VoxTypeDaemon {
             .map_err(map_error)?;
         if let Some(recording) = self.recording.take() {
             recording.cancel();
+        }
+        if let Some(job) = self.recognition_job.take() {
+            job.cancellation.cancel();
+            let _ = fs::remove_file(&job.recording_path);
         }
         self.recording_started_at = None;
         if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
@@ -392,7 +444,7 @@ impl VoxTypeDaemon {
     }
 
     fn reload_configuration(&mut self) -> fdo::Result<()> {
-        if self.recording.is_some() {
+        if self.recording.is_some() || self.recognition_job.is_some() {
             return Err(fdo::Error::Failed(
                 "configuration reload requires an idle daemon".to_owned(),
             ));
@@ -421,6 +473,10 @@ impl VoxTypeDaemon {
     fn quit(&mut self) {
         if let Some(recording) = self.recording.take() {
             recording.cancel();
+        }
+        if let Some(job) = self.recognition_job.take() {
+            job.cancellation.cancel();
+            let _ = fs::remove_file(&job.recording_path);
         }
         self.recording_started_at = None;
         if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
@@ -461,6 +517,7 @@ impl VoxTypeDaemon {
             provider_usage: std::collections::BTreeMap::new(),
             transcript_history: VecDeque::with_capacity(20),
             recording_started_at: None,
+            recognition_job: None,
             quit: false,
         })
     }
@@ -495,6 +552,82 @@ impl VoxTypeDaemon {
         Ok(true)
     }
 
+    /// Applies a completed background recognition result, if one is ready.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error when the provider failed or final insertion could
+    /// not be completed. Late results for another/cancelled session are dropped.
+    pub fn poll_recognition(&mut self) -> fdo::Result<bool> {
+        let received = match self.recognition_job.as_ref() {
+            None => return Ok(false),
+            Some(job) => match job
+                .receiver
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .try_recv()
+            {
+                Ok(result) => result,
+                Err(TryRecvError::Empty) => return Ok(false),
+                Err(TryRecvError::Disconnected) => RecognitionWorkerResult {
+                    attempts: Vec::new(),
+                    outcome: Err(VoxError::new(
+                        ErrorCategory::Internal,
+                        "provider.worker_disconnected",
+                        "recognition worker exited without a result",
+                    )),
+                },
+            },
+        };
+        let Some(job) = self.recognition_job.take() else {
+            return Ok(false);
+        };
+        let is_current = self.machine.state().name() == "finalizing"
+            && self.machine.state().session() == Some(&job.session);
+        if !is_current {
+            self.cleanup_recognition_job(&job);
+            return Ok(true);
+        }
+
+        for attempt in received.attempts {
+            let usage = self
+                .provider_usage
+                .entry(attempt.provider_id.clone())
+                .or_default();
+            usage.record_attempt();
+            if attempt.request_started {
+                usage.record_request(job.audio_millis);
+            }
+            if let Some(error) = attempt.error {
+                usage.record_failure();
+                self.provider_failed(&attempt.provider_id, error.is_retryable());
+            }
+        }
+
+        let result = match received.outcome {
+            Ok(success) => self.complete_recognition(
+                &job.session,
+                &success.provider_id,
+                success.transcript,
+                job.vad_result,
+            ),
+            Err(error) => self.fail_recognition(&job.session, error),
+        };
+        if result.is_err() && self.armed_insertion == Some(ArmedInsertion::Fcitx) {
+            FcitxBridge.cancel(&job.session);
+        }
+        self.cleanup_recognition_job(&job);
+        self.active_profile = None;
+        self.armed_insertion = None;
+        result.map(|_| true)
+    }
+
+    fn cleanup_recognition_job(&self, job: &RecognitionJob) {
+        if !self.config.desktop.retain_recordings {
+            let _ = fs::remove_file(&job.recording_path);
+        }
+    }
+
     fn active_session_id(&self, requested: &str) -> fdo::Result<SessionId> {
         let active = self
             .machine
@@ -511,7 +644,7 @@ impl VoxTypeDaemon {
         }
     }
 
-    fn finish_recognition(
+    fn begin_recognition(
         &mut self,
         session: &SessionId,
         recording: &RecordingResult,
@@ -544,68 +677,58 @@ impl VoxTypeDaemon {
         let replay = ReplayPolicy::from(profile.replay);
         let language = profile.language.clone();
 
-        let mut last_error = None;
-        let mut attempted_provider = false;
-        for provider_id in &providers {
-            if !self.provider_is_available(provider_id) {
-                continue;
-            }
-            if attempted_provider && replay != ReplayPolicy::BufferedWithConsent {
-                break;
-            }
-            attempted_provider = true;
-            self.provider_usage
-                .entry(provider_id.clone())
-                .or_default()
-                .record_attempt();
-            let prepared = match self.prepare_provider(provider_id) {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    self.provider_usage
-                        .entry(provider_id.clone())
-                        .or_default()
-                        .record_failure();
-                    let retryable = error.is_retryable();
-                    self.provider_failed(provider_id, retryable);
-                    last_error = Some(error);
-                    if !retryable {
-                        break;
-                    }
-                    continue;
-                }
-            };
-            if !matches!(&prepared, PreparedProvider::Mock(_)) {
-                self.provider_usage
-                    .entry(provider_id.clone())
-                    .or_default()
-                    .record_request(audio_millis);
-            }
-            match invoke_provider(prepared, &recording.path, &language) {
-                Ok(transcript) => {
-                    return self.complete_recognition(session, provider_id, transcript, vad_result);
-                }
-                Err(error) => {
-                    self.provider_usage
-                        .entry(provider_id.clone())
-                        .or_default()
-                        .record_failure();
-                    let retryable = error.is_retryable();
-                    self.provider_failed(provider_id, retryable);
-                    last_error = Some(error);
-                    if !retryable {
-                        break;
-                    }
-                }
-            }
+        let provider_configs = providers
+            .into_iter()
+            .filter(|provider_id| self.provider_is_available(provider_id))
+            .filter_map(|provider_id| {
+                self.config
+                    .providers
+                    .get(&provider_id)
+                    .cloned()
+                    .map(|config| (provider_id, config))
+            })
+            .collect::<Vec<_>>();
+        if provider_configs.is_empty() {
+            return self.fail_recognition(
+                session,
+                VoxError::new(
+                    ErrorCategory::Unavailable,
+                    "provider.no_route",
+                    "no configured provider is currently available",
+                ),
+            );
         }
 
-        let error = last_error.unwrap_or_else(|| {
-            VoxError::new(
-                ErrorCategory::Unavailable,
-                "provider.no_route",
-                "no provider was attempted",
-            )
+        let cancellation = CancellationToken::new();
+        let worker_cancellation = cancellation.clone();
+        let path = recording.path.clone();
+        let worker_path = path.clone();
+        let (sender, receiver) = sync_channel(1);
+        thread::Builder::new()
+            .name(format!("voxtype-recognition-{session}"))
+            .spawn(move || {
+                let result = run_recognition_worker(
+                    provider_configs,
+                    replay,
+                    &worker_path,
+                    &language,
+                    &worker_cancellation,
+                );
+                let _ = sender.send(result);
+            })
+            .map_err(|error| fdo::Error::Failed(format!("could not start recognition: {error}")))?;
+        self.recognition_job = Some(RecognitionJob {
+            session: session.clone(),
+            cancellation,
+            receiver: Mutex::new(receiver),
+            recording_path: path,
+            vad_result,
+            audio_millis,
         });
+        Ok(format!("session={session} result=processing"))
+    }
+
+    fn fail_recognition(&mut self, session: &SessionId, error: VoxError) -> fdo::Result<String> {
         let message = error.to_string();
         let _effect = self.machine.apply(Command::Fail {
             session: session.clone(),
@@ -668,12 +791,12 @@ impl VoxTypeDaemon {
             );
         } else {
             notify("VoxType", "Dictation inserted");
-            overlay(
-                "done",
-                "Text inserted",
-                "Meta+Alt+G checks recent grammar",
-                2_000,
-            );
+            let detail = if self.config.desktop.transcript_history_enabled {
+                "Meta+Alt+G checks recent text"
+            } else {
+                "Transcript history is off"
+            };
+            overlay("done", "Text inserted", detail, 2_000);
         }
         Ok(format!(
             "session={session} provider={provider_id} chars={} backend={} clipboard_restored={} vad={}",
@@ -799,67 +922,133 @@ impl VoxTypeDaemon {
             .or_default();
         health.record_retryable_failure_at(Instant::now());
     }
+}
 
-    fn prepare_provider(&self, provider_id: &str) -> Result<PreparedProvider, VoxError> {
-        let provider = self.config.providers.get(provider_id).ok_or_else(|| {
-            VoxError::new(
-                ErrorCategory::Configuration,
-                "provider.not_found",
-                format!("provider {provider_id} is not configured"),
-            )
-        })?;
-        match provider {
-            ProviderConfig::Mock { text } => {
-                if text.trim().is_empty() {
-                    Err(VoxError::new(
-                        ErrorCategory::Protocol,
-                        "provider.mock_empty",
-                        "mock provider text is empty",
-                    ))
-                } else {
-                    Ok(PreparedProvider::Mock(text.clone()))
+fn run_recognition_worker(
+    providers: Vec<(String, ProviderConfig)>,
+    replay: ReplayPolicy,
+    pcm_path: &Path,
+    language: &str,
+    cancellation: &CancellationToken,
+) -> RecognitionWorkerResult {
+    let mut attempts = Vec::new();
+    let mut last_error = None;
+    for (provider_id, config) in providers {
+        if cancellation.is_cancelled() {
+            last_error = Some(cancelled_error());
+            break;
+        }
+        let prepared = match prepare_provider(&config) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let retryable = error.is_retryable();
+                attempts.push(ProviderAttemptReport {
+                    provider_id,
+                    request_started: false,
+                    error: Some(error.clone()),
+                });
+                last_error = Some(error);
+                if !retryable {
+                    break;
+                }
+                continue;
+            }
+        };
+        let request_started = !matches!(&prepared, PreparedProvider::Mock(_));
+        match invoke_provider(prepared, pcm_path, language, cancellation) {
+            Ok(transcript) => {
+                attempts.push(ProviderAttemptReport {
+                    provider_id: provider_id.clone(),
+                    request_started,
+                    error: None,
+                });
+                return RecognitionWorkerResult {
+                    attempts,
+                    outcome: Ok(RecognitionSuccess {
+                        provider_id,
+                        transcript,
+                    }),
+                };
+            }
+            Err(error) => {
+                let retryable = error.is_retryable();
+                let cancelled = error.category() == ErrorCategory::Cancelled;
+                attempts.push(ProviderAttemptReport {
+                    provider_id,
+                    request_started,
+                    error: Some(error.clone()),
+                });
+                last_error = Some(error);
+                if cancelled || !retryable || replay != ReplayPolicy::BufferedWithConsent {
+                    break;
                 }
             }
-            ProviderConfig::OpenaiCompatible {
-                endpoint,
-                model,
-                secret,
-                timeout_seconds,
-            } => {
-                let api_key = lookup_secret(secret)?;
-                Ok(PreparedProvider::Rest(RestProviderConfig {
-                    endpoint: endpoint.clone(),
-                    model: model.clone(),
-                    api_key,
-                    timeout_seconds: *timeout_seconds,
-                }))
-            }
-            ProviderConfig::Deepgram {
-                endpoint,
-                model,
-                secret,
-                timeout_seconds,
-                smart_format,
-            } => {
-                let api_key = lookup_deepgram_secret(secret)?;
-                Ok(PreparedProvider::Deepgram(DeepgramConfig {
-                    endpoint: endpoint.clone(),
-                    model: model.clone(),
-                    api_key,
-                    timeout_seconds: *timeout_seconds,
-                    smart_format: *smart_format,
-                }))
-            }
-            ProviderConfig::Command {
-                program,
-                args,
-                timeout_seconds,
-            } => Ok(PreparedProvider::Command {
-                program: program.clone(),
-                args: args.clone(),
-                timeout_seconds: *timeout_seconds,
-            }),
         }
+    }
+    RecognitionWorkerResult {
+        attempts,
+        outcome: Err(last_error.unwrap_or_else(|| {
+            VoxError::new(
+                ErrorCategory::Unavailable,
+                "provider.no_route",
+                "no provider was attempted",
+            )
+        })),
+    }
+}
+
+fn prepare_provider(provider: &ProviderConfig) -> Result<PreparedProvider, VoxError> {
+    match provider {
+        ProviderConfig::Mock { text } => {
+            if text.trim().is_empty() {
+                Err(VoxError::new(
+                    ErrorCategory::Protocol,
+                    "provider.mock_empty",
+                    "mock provider text is empty",
+                ))
+            } else {
+                Ok(PreparedProvider::Mock(text.clone()))
+            }
+        }
+        ProviderConfig::OpenaiCompatible {
+            endpoint,
+            model,
+            secret,
+            timeout_seconds,
+        } => {
+            let api_key = lookup_secret(secret)?;
+            Ok(PreparedProvider::Rest(RestProviderConfig {
+                endpoint: endpoint.clone(),
+                model: model.clone(),
+                api_key,
+                timeout_seconds: *timeout_seconds,
+            }))
+        }
+        ProviderConfig::Deepgram {
+            endpoint,
+            model,
+            secret,
+            timeout_seconds,
+            smart_format,
+        } => {
+            let api_key = lookup_deepgram_secret(secret)?;
+            Ok(PreparedProvider::Deepgram(DeepgramConfig {
+                endpoint: endpoint.clone(),
+                model: model.clone(),
+                api_key,
+                timeout_seconds: *timeout_seconds,
+                smart_format: *smart_format,
+            }))
+        }
+        ProviderConfig::Command {
+            program,
+            args,
+            timeout_seconds,
+        } => Ok(PreparedProvider::Command {
+            program: program.clone(),
+            args: args.clone(),
+            timeout_seconds: *timeout_seconds,
+        }),
     }
 }
 
@@ -867,36 +1056,49 @@ fn invoke_provider(
     provider: PreparedProvider,
     pcm_path: &Path,
     language: &str,
+    cancellation: &CancellationToken,
 ) -> Result<ProviderTranscript, VoxError> {
+    if cancellation.is_cancelled() {
+        return Err(cancelled_error());
+    }
     match provider {
         PreparedProvider::Mock(text) => Ok(ProviderTranscript {
             text,
             api_usage: ApiUsage::default(),
         }),
-        PreparedProvider::Rest(config) => {
-            transcribe_pcm(&config, pcm_path, language).map(|result| ProviderTranscript {
-                text: result.text,
-                api_usage: result.usage,
-            })
-        }
-        PreparedProvider::Deepgram(config) => transcribe_deepgram_pcm(&config, pcm_path, language)
+        PreparedProvider::Rest(config) => transcribe_pcm(&config, pcm_path, language, cancellation)
             .map(|result| ProviderTranscript {
                 text: result.text,
-                api_usage: ApiUsage::default(),
+                api_usage: result.usage,
             }),
+        PreparedProvider::Deepgram(config) => {
+            transcribe_deepgram_pcm(&config, pcm_path, language, cancellation).map(|result| {
+                ProviderTranscript {
+                    text: result.text,
+                    api_usage: ApiUsage::default(),
+                }
+            })
+        }
         PreparedProvider::Command {
             program,
             args,
             timeout_seconds,
-        } => transcribe_command(&program, &args, timeout_seconds, pcm_path, language).map(|text| {
-            ProviderTranscript {
-                text,
-                api_usage: ApiUsage::default(),
-            }
+        } => transcribe_command_cancellable(
+            &program,
+            &args,
+            timeout_seconds,
+            pcm_path,
+            language,
+            cancellation,
+        )
+        .map(|text| ProviderTranscript {
+            text,
+            api_usage: ApiUsage::default(),
         }),
     }
 }
 
+#[cfg(test)]
 fn transcribe_command(
     program: &str,
     args: &[String],
@@ -904,11 +1106,33 @@ fn transcribe_command(
     pcm_path: &Path,
     language: &str,
 ) -> Result<String, VoxError> {
+    transcribe_command_cancellable(
+        program,
+        args,
+        timeout_seconds,
+        pcm_path,
+        language,
+        &CancellationToken::new(),
+    )
+}
+
+fn transcribe_command_cancellable(
+    program: &str,
+    args: &[String],
+    timeout_seconds: u64,
+    pcm_path: &Path,
+    language: &str,
+    cancellation: &CancellationToken,
+) -> Result<String, VoxError> {
+    if cancellation.is_cancelled() {
+        return Err(cancelled_error());
+    }
     let mut child = ProcessCommand::new(program)
         .args(args)
         .env("VOXTYPE_AUDIO_PATH", pcm_path)
         .env("VOXTYPE_LANGUAGE", language)
         .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .process_group(0)
         .spawn()
         .map_err(|error| {
@@ -919,53 +1143,72 @@ fn transcribe_command(
             )
             .with_retryable(true)
         })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        VoxError::new(
+            ErrorCategory::Internal,
+            "provider.command_output",
+            "command provider stdout is unavailable",
+        )
+    })?;
+    let output_reader = thread::spawn(move || read_command_output(stdout, 1024 * 1024));
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
-    loop {
-        if child
-            .try_wait()
-            .map_err(|error| {
-                VoxError::new(
-                    ErrorCategory::Unavailable,
-                    "provider.command_wait",
-                    error.to_string(),
-                )
-            })?
-            .is_some()
-        {
-            break;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            VoxError::new(
+                ErrorCategory::Unavailable,
+                "provider.command_wait",
+                error.to_string(),
+            )
+        })? {
+            break status;
         }
         if Instant::now() >= deadline {
-            let process_group = format!("-{}", child.id());
-            let _ = ProcessCommand::new("kill")
-                .args(["-KILL", "--", &process_group])
-                .status();
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_process_group(&mut child);
             return Err(VoxError::new(
-                ErrorCategory::RateLimited,
+                ErrorCategory::Timeout,
                 "provider.command_timeout",
                 "command provider timed out",
             )
             .with_retryable(true));
         }
+        if cancellation.is_cancelled() {
+            terminate_process_group(&mut child);
+            return Err(cancelled_error());
+        }
         std::thread::sleep(Duration::from_millis(20));
+    };
+    let output = output_reader
+        .join()
+        .map_err(|_| {
+            VoxError::new(
+                ErrorCategory::Internal,
+                "provider.command_output",
+                "command output reader panicked",
+            )
+        })?
+        .map_err(|error| {
+            VoxError::new(
+                ErrorCategory::Unavailable,
+                "provider.command_output",
+                error.to_string(),
+            )
+        })?;
+    if output.overflowed {
+        return Err(VoxError::new(
+            ErrorCategory::Protocol,
+            "provider.command_output_too_large",
+            "command provider output exceeded 1048576 bytes",
+        ));
     }
-    let output = child.wait_with_output().map_err(|error| {
-        VoxError::new(
-            ErrorCategory::Unavailable,
-            "provider.command_output",
-            error.to_string(),
-        )
-    })?;
-    if !output.status.success() {
+    if !status.success() {
         return Err(VoxError::new(
             ErrorCategory::Unavailable,
             "provider.command_exit",
-            format!("command exited with {}", output.status),
+            format!("command exited with {status}"),
         )
         .with_retryable(true));
     }
-    let text = String::from_utf8(output.stdout).map_err(|error| {
+    let text = String::from_utf8(output.bytes).map_err(|error| {
         VoxError::new(
             ErrorCategory::Protocol,
             "provider.command_output",
@@ -981,6 +1224,44 @@ fn transcribe_command(
         ));
     }
     Ok(text)
+}
+
+struct BoundedCommandOutput {
+    bytes: Vec<u8>,
+    overflowed: bool,
+}
+
+fn read_command_output(mut reader: impl Read, limit: usize) -> io::Result<BoundedCommandOutput> {
+    let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
+    let mut overflowed = false;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let retained = limit.saturating_sub(bytes.len()).min(count);
+        bytes.extend_from_slice(&buffer[..retained]);
+        overflowed |= retained < count;
+    }
+    Ok(BoundedCommandOutput { bytes, overflowed })
+}
+
+fn terminate_process_group(child: &mut std::process::Child) {
+    let process_group = format!("-{}", child.id());
+    let _ = ProcessCommand::new("kill")
+        .args(["-KILL", "--", &process_group])
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn cancelled_error() -> VoxError {
+    VoxError::new(
+        ErrorCategory::Cancelled,
+        "provider.cancelled",
+        "recognition was cancelled",
+    )
 }
 
 impl VoxTypeDaemon {
@@ -1049,6 +1330,25 @@ fn may_auto_fallback_from_fcitx(error: &VoxError) -> bool {
         error.code(),
         "fcitx.transport_failed" | "fcitx.runtime_unavailable"
     )
+}
+
+fn select_auto_insertion(arm_result: Result<(), VoxError>) -> Result<ArmedInsertion, VoxError> {
+    match arm_result {
+        Ok(()) => Ok(ArmedInsertion::Fcitx),
+        Err(error) if may_auto_fallback_from_fcitx(&error) => Ok(ArmedInsertion::Copy),
+        Err(error) => Err(error),
+    }
+}
+
+fn profile_is_demo_only(config: &Config, profile: &ProfileConfig) -> bool {
+    std::iter::once(&profile.primary)
+        .chain(&profile.fallbacks)
+        .all(|provider_id| {
+            matches!(
+                config.providers.get(provider_id),
+                Some(ProviderConfig::Mock { .. })
+            )
+        })
 }
 
 fn overlay(state: &str, title: &str, body: &str, timeout_millis: u32) {
@@ -1134,6 +1434,50 @@ mod tests {
         assert!(!may_auto_fallback_from_fcitx(&secure));
         assert!(!may_auto_fallback_from_fcitx(&missing_focus));
         assert!(may_auto_fallback_from_fcitx(&unavailable));
+        assert_eq!(
+            select_auto_insertion(Err(unavailable)),
+            Ok(ArmedInsertion::Copy)
+        );
+        assert_eq!(
+            select_auto_insertion(Err(secure))
+                .expect_err("secure context must be rejected")
+                .code(),
+            "fcitx.bridge_rejected"
+        );
+    }
+
+    #[test]
+    fn demo_only_profile_is_not_a_real_recognition_route() {
+        let mut config: Config = toml::from_str(
+            r#"schema_version = 1
+default_profile = "demo"
+[desktop]
+[audio]
+[profiles.demo]
+primary = "demo"
+[providers.demo]
+kind = "mock"
+text = "fixed text"
+"#,
+        )
+        .expect("demo config");
+        assert!(profile_is_demo_only(&config, &config.profiles["demo"]));
+
+        config.providers.insert(
+            "local".to_owned(),
+            ProviderConfig::Command {
+                program: "/usr/bin/true".to_owned(),
+                args: Vec::new(),
+                timeout_seconds: 30,
+            },
+        );
+        config
+            .profiles
+            .get_mut("demo")
+            .expect("demo profile")
+            .fallbacks
+            .push("local".to_owned());
+        assert!(!profile_is_demo_only(&config, &config.profiles["demo"]));
     }
 
     #[test]
@@ -1154,8 +1498,100 @@ mod tests {
         let error = transcribe_command("/bin/sh", &args, 1, Path::new("/tmp/audio.wav"), "zh")
             .expect_err("command must time out");
         assert_eq!(error.code(), "provider.command_timeout");
+        assert_eq!(error.category(), ErrorCategory::Timeout);
         assert!(error.is_retryable());
         std::thread::sleep(Duration::from_millis(1_500));
         assert!(!marker.exists(), "descendant process survived timeout");
+    }
+
+    #[test]
+    fn command_provider_cancellation_kills_the_process_group() {
+        let cancellation = CancellationToken::new();
+        let trigger = cancellation.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            trigger.cancel();
+        });
+        let started = Instant::now();
+        let error = transcribe_command_cancellable(
+            "/bin/sleep",
+            &["5".to_owned()],
+            10,
+            Path::new("/tmp/audio.wav"),
+            "zh",
+            &cancellation,
+        )
+        .expect_err("command must be cancelled");
+        assert_eq!(error.category(), ErrorCategory::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        canceller.join().expect("canceller thread");
+    }
+
+    #[test]
+    fn worker_rejects_pre_cancelled_work() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let result = run_recognition_worker(
+            vec![(
+                "mock".to_owned(),
+                ProviderConfig::Mock {
+                    text: "late".to_owned(),
+                },
+            )],
+            ReplayPolicy::Never,
+            Path::new("/tmp/audio.pcm"),
+            "zh",
+            &cancellation,
+        );
+        assert!(result.attempts.is_empty());
+        assert_eq!(
+            result.outcome.expect_err("cancelled outcome").category(),
+            ErrorCategory::Cancelled
+        );
+    }
+
+    #[test]
+    fn worker_does_not_replay_audio_without_consent() {
+        let result = run_recognition_worker(
+            vec![
+                (
+                    "failure".to_owned(),
+                    ProviderConfig::Command {
+                        program: "/bin/false".to_owned(),
+                        args: Vec::new(),
+                        timeout_seconds: 1,
+                    },
+                ),
+                (
+                    "mock".to_owned(),
+                    ProviderConfig::Mock {
+                        text: "must not run".to_owned(),
+                    },
+                ),
+            ],
+            ReplayPolicy::Never,
+            Path::new("/tmp/audio.pcm"),
+            "zh",
+            &CancellationToken::new(),
+        );
+        assert_eq!(result.attempts.len(), 1);
+        assert!(result.outcome.is_err());
+    }
+
+    #[test]
+    fn command_provider_output_is_bounded() {
+        let error = transcribe_command(
+            "/usr/bin/head",
+            &[
+                "-c".to_owned(),
+                "1048577".to_owned(),
+                "/dev/zero".to_owned(),
+            ],
+            2,
+            Path::new("/tmp/audio.wav"),
+            "zh",
+        )
+        .expect_err("oversized output must fail");
+        assert_eq!(error.code(), "provider.command_output_too_large");
     }
 }

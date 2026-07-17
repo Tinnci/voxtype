@@ -423,6 +423,82 @@ mod tests {
     }
 
     #[test]
+    fn late_transcript_after_cancel_is_rejected() {
+        let mut machine = SessionMachine::default();
+        let session = start(&mut machine);
+        machine
+            .apply(Command::CaptureReady {
+                session: session.clone(),
+            })
+            .expect("capture becomes ready");
+        machine
+            .apply(Command::Stop {
+                session: session.clone(),
+            })
+            .expect("stop is accepted");
+        machine
+            .apply(Command::Cancel {
+                session: session.clone(),
+            })
+            .expect("cancel is accepted while finalizing");
+
+        let error = machine
+            .apply(Command::TranscriptReady {
+                session,
+                text: "stale result".to_owned(),
+            })
+            .expect_err("cancelled work must not insert a late transcript");
+        assert_eq!(error.category(), ErrorCategory::InvalidState);
+        assert_eq!(machine.state().name(), "cancelled");
+    }
+
+    #[test]
+    fn old_session_result_cannot_complete_a_new_session() {
+        let mut machine = SessionMachine::default();
+        let first = start(&mut machine);
+        machine
+            .apply(Command::Cancel {
+                session: first.clone(),
+            })
+            .expect("first session is cancelled");
+
+        let second = start(&mut machine);
+        machine
+            .apply(Command::CaptureReady {
+                session: second.clone(),
+            })
+            .expect("second capture becomes ready");
+        machine
+            .apply(Command::Stop {
+                session: second.clone(),
+            })
+            .expect("second stop is accepted");
+
+        let error = machine
+            .apply(Command::TranscriptReady {
+                session: first,
+                text: "stale result".to_owned(),
+            })
+            .expect_err("a previous session cannot complete the active one");
+        assert_eq!(error.category(), ErrorCategory::InvalidArgument);
+        assert_eq!(machine.state().session(), Some(&second));
+
+        let effect = machine
+            .apply(Command::TranscriptReady {
+                session: second.clone(),
+                text: "current result".to_owned(),
+            })
+            .expect("current session transcript is accepted");
+        assert_eq!(
+            effect,
+            CommandEffect::InsertText {
+                session: second,
+                text: "current result".to_owned(),
+            }
+        );
+    }
+
+    #[test]
     fn terminal_session_allows_next_start() {
         let mut machine = SessionMachine::default();
         let first = start(&mut machine);

@@ -11,6 +11,10 @@ consent, usage semantics, and stale-result rejection. The next production step
 is to replace the daemon's synchronous `PreparedProvider` dispatch with a
 bounded background job and connect the core router to real lifecycle states:
 prepared, request started, audio accepted, completed, and cancelled.
+Provider execution is now off the D-Bus object lock with session-checked result
+delivery and cancellable curl/command children. The next routing refinement is
+to report the exact transport `audio accepted` boundary instead of treating a
+started batch request as accepted.
 
 ## Layer 1: capture and speech signal processing
 
@@ -53,8 +57,9 @@ system integrations. Required work is event correctness:
 - no automatic clipboard downgrade after focus/security rejection (implemented);
 - state signals that drive a live tray and persistent overlay.
 
-`copy` is the portable no-injection fallback. Clipboard plus `ydotool` remains
-an explicit compatibility choice and is not a daemon service dependency.
+`copy` is the portable no-injection fallback and the only automatic fallback
+when Fcitx is unavailable. Clipboard plus `ydotool` remains an explicit unsafe
+compatibility choice and is not a daemon service dependency.
 
 ## Layer 4: user experience, configuration, and diagnostics
 
@@ -94,3 +99,52 @@ LibreOffice, and a terminal on Plasma Wayland.
 Work packages 1 and 2 define the interfaces and can proceed in parallel. Work
 packages 3 and 4 build against those lifecycle events. Package 5 continuously
 adds acceptance evidence rather than waiting until the end.
+
+## Mock replacement inventory
+
+Replace a double only when it can affect a normal user path. Keep deterministic
+doubles at protocol and process boundaries so failure behavior remains testable.
+
+### P0: remove from normal product paths
+
+- A fixed-text provider must never be mistaken for successful ASR. A default
+  demo-only profile is now rejected by the normal no-profile start action;
+  developers may still name that profile explicitly for insertion integration
+  tests. First-run UI must lead to a real cloud or local provider.
+- The overlay must not advertise recent-text checking while transcript history
+  is disabled. Retaining prior input requires an explicit privacy decision.
+- Any provider `success` must come from a parsed non-empty provider response or
+  a real local command result, never a generated sample string.
+
+### P1: replace approximations with truthful production algorithms
+
+- Evolve audio capture from the `parec` compatibility process to a PipeWire
+  stream with negotiated device identity, bounded buffers, drop accounting,
+  resampling, and hot-plug recovery.
+- Keep the stateful energy VAD, but add DC rejection, independently smoothed
+  short/long energy, calibrated SNR confidence, and live endpoint events. This
+  is an algorithm improvement, not replacement of a mock.
+- Present `grammar.rs` as local typography/text cleanup. A feature called full
+  grammar checking needs a separate pluggable local or online checker plus a
+  review/apply/undo flow; heuristics must not be labelled as semantic grammar.
+- Replace the one-shot overlay snapshot with a persistent, event-driven view of
+  daemon state, elapsed time, real input level, VAD state, and discrete provider
+  phases. Decorative animation is not a level or completion measurement.
+- Treat request/audio/token counters as daemon-session telemetry and configured
+  limits as local soft limits. Provider account balance or billing quota may be
+  shown only when fetched from an authoritative provider API with provenance.
+- Replace calibration's single mixed sample with guided silence and speech
+  phases that calculate noise, speech RMS, SNR, clipping ratio, and confidence.
+
+### Keep as test doubles
+
+- loopback HTTP servers, redirect/timeout/oversize responses, and sanitized
+  provider JSON fixtures;
+- synthetic PCM frames for VAD, trimming, WAV, and cancellation tests;
+- the deterministic fixed-text provider when explicitly selected by a test;
+- command children used to test timeout, cancellation, process-group cleanup,
+  and bounded output;
+- fake focus/secure-field outcomes and clipboard/Fcitx transport fixtures.
+
+These doubles make boundary behavior reproducible and should not be replaced by
+live services in the default test suite. Add opt-in live smoke tests separately.

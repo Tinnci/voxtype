@@ -90,7 +90,7 @@ impl<'a> Client<'a> {
         self.proxy.call("Start", &(profile))
     }
 
-    /// Stops recording and returns capture metadata.
+    /// Stops recording, starts background recognition, and returns acceptance metadata.
     ///
     /// # Errors
     ///

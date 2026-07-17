@@ -4,8 +4,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use voxtype_core::{ErrorCategory, VoxError};
-pub use voxtype_provider_common::SecretString;
-use voxtype_provider_common::{DEFAULT_MAX_RESPONSE_BYTES, escape_curl_config, execute_curl};
+pub use voxtype_provider_common::{CancellationToken, SecretString};
+use voxtype_provider_common::{
+    DEFAULT_MAX_RESPONSE_BYTES, escape_curl_config, execute_curl_cancellable,
+};
 
 #[derive(Debug)]
 pub struct RestProviderConfig {
@@ -43,9 +45,24 @@ pub fn transcribe_pcm(
     pcm_path: &Path,
     language: &str,
 ) -> Result<Transcription, VoxError> {
+    transcribe_pcm_cancellable(config, pcm_path, language, &CancellationToken::new())
+}
+
+/// Transcribes PCM while allowing another thread to terminate the HTTP request.
+///
+/// # Errors
+///
+/// Returns the same errors as [`transcribe_pcm`], including a cancelled error
+/// when the supplied token is cancelled.
+pub fn transcribe_pcm_cancellable(
+    config: &RestProviderConfig,
+    pcm_path: &Path,
+    language: &str,
+    cancellation: &CancellationToken,
+) -> Result<Transcription, VoxError> {
     validate_endpoint(&config.endpoint)?;
     let wav_path = pcm_to_wav(pcm_path).map_err(io_error)?;
-    let result = request(config, &wav_path, language);
+    let result = request(config, &wav_path, language, cancellation);
     let _remove_result = fs::remove_file(wav_path);
     result
 }
@@ -54,6 +71,7 @@ fn request(
     config: &RestProviderConfig,
     wav_path: &Path,
     language: &str,
+    cancellation: &CancellationToken,
 ) -> Result<Transcription, VoxError> {
     let mut args = vec![
         "--request".to_owned(),
@@ -74,11 +92,12 @@ fn request(
         "header = \"Authorization: Bearer {}\"\nheader = \"Accept: application/json\"\n",
         escape_curl_config(config.api_key.expose())
     );
-    let response = execute_curl(
+    let response = execute_curl_cancellable(
         &args,
         config.timeout_seconds,
         config_input.as_bytes(),
         DEFAULT_MAX_RESPONSE_BYTES,
+        cancellation,
     )
     .map_err(|error| error.into_vox_error("provider.http_failed"))?;
 
@@ -249,6 +268,30 @@ mod tests {
     }
 
     #[test]
+    fn cancels_an_in_flight_request() {
+        let (address, server) = spawn_response(
+            200,
+            Vec::new(),
+            br#"{"text":"too late"}"#.to_vec(),
+            Duration::from_millis(500),
+        );
+        let cancellation = CancellationToken::new();
+        let trigger = cancellation.clone();
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            trigger.cancel();
+        });
+        let started = std::time::Instant::now();
+        let error = transcribe_fixture_cancellable(address, 5, &cancellation)
+            .expect_err("request must be cancelled");
+        assert_eq!(error.category(), ErrorCategory::Cancelled);
+        assert!(!error.is_retryable());
+        assert!(started.elapsed() < Duration::from_millis(400));
+        canceller.join().expect("cancellation thread");
+        server.join().expect("loopback server");
+    }
+
+    #[test]
     fn refuses_redirect_without_contacting_target() {
         let target = TcpListener::bind("127.0.0.1:0").expect("redirect target");
         let location = format!(
@@ -307,6 +350,14 @@ mod tests {
         address: SocketAddr,
         timeout_seconds: u64,
     ) -> Result<Transcription, VoxError> {
+        transcribe_fixture_cancellable(address, timeout_seconds, &CancellationToken::new())
+    }
+
+    fn transcribe_fixture_cancellable(
+        address: SocketAddr,
+        timeout_seconds: u64,
+        cancellation: &CancellationToken,
+    ) -> Result<Transcription, VoxError> {
         assert_curl_available();
         let unique = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let timestamp = SystemTime::now()
@@ -320,7 +371,7 @@ mod tests {
         fs::create_dir_all(&directory).expect("temporary directory");
         let pcm = directory.join("sample.pcm");
         fs::write(&pcm, vec![0_u8; 3_200]).expect("PCM fixture");
-        let result = transcribe_pcm(
+        let result = transcribe_pcm_cancellable(
             &RestProviderConfig {
                 endpoint: format!("http://{address}/v1/audio/transcriptions"),
                 model: "test-model".to_owned(),
@@ -329,6 +380,7 @@ mod tests {
             },
             &pcm,
             "zh",
+            cancellation,
         );
         let _ = fs::remove_dir_all(directory);
         result

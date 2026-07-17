@@ -5,7 +5,12 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
+use std::time::Duration;
 use voxtype_core::{ErrorCategory, VoxError};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -18,6 +23,26 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 16 * 1024;
 const HTTP_STATUS_MARKER: &str = "VOXTYPE_HTTP_STATUS:";
 const CURL_WRITE_OUT: &str = "%{stderr}\nVOXTYPE_HTTP_STATUS:%{http_code}\n";
+
+/// Cheap cloneable cancellation flag shared by daemon and provider workers.
+#[derive(Clone, Debug, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretString(String);
@@ -69,6 +94,7 @@ impl std::fmt::Debug for SecretString {
 }
 
 /// Successful output from one non-redirecting curl request.
+#[derive(Debug)]
 pub struct CurlResponse {
     pub http_status: u16,
     pub body: Vec<u8>,
@@ -142,6 +168,35 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    execute_curl_cancellable(
+        args,
+        timeout_seconds,
+        private_config,
+        max_response_bytes,
+        &CancellationToken::new(),
+    )
+}
+
+/// Executes one bounded curl request that can be interrupted by another thread.
+///
+/// # Errors
+///
+/// Returns [`ErrorCategory::Cancelled`] after terminating and reaping curl when
+/// the token is cancelled, or the same transport failures as [`execute_curl`].
+pub fn execute_curl_cancellable<I, S>(
+    args: I,
+    timeout_seconds: u64,
+    private_config: &[u8],
+    max_response_bytes: usize,
+    cancellation: &CancellationToken,
+) -> Result<CurlResponse, CurlFailure>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    if cancellation.is_cancelled() {
+        return Err(cancelled_failure());
+    }
     let max_response_bytes = max_response_bytes.max(1);
     let mut command = curl_command(timeout_seconds, max_response_bytes);
     command
@@ -184,17 +239,12 @@ where
         || Some(io::Error::other("curl stdin is unavailable")),
         |mut stdin| stdin.write_all(private_config).err(),
     );
-    let status = child.wait().map_err(|error| {
-        failure(
-            ErrorCategory::Unavailable,
-            true,
-            format!("could not wait for curl: {error}"),
-            None,
-            None,
-        )
-    })?;
+    let (status, was_cancelled) = wait_for_curl(&mut child, cancellation)?;
     let body = join_reader(stdout_reader, "stdout")?;
     let diagnostics = join_reader(stderr_reader, "stderr")?;
+    if was_cancelled {
+        return Err(cancelled_failure());
+    }
     let http_status = parse_http_status(&diagnostics.bytes);
     let curl_exit_code = status.code();
     let diagnostic = sanitized_diagnostic(&diagnostics.bytes);
@@ -249,6 +299,49 @@ where
         http_status,
         body: body.bytes,
     })
+}
+
+fn wait_for_curl(
+    child: &mut std::process::Child,
+    cancellation: &CancellationToken,
+) -> Result<(std::process::ExitStatus, bool), CurlFailure> {
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            failure(
+                ErrorCategory::Unavailable,
+                true,
+                format!("could not wait for curl: {error}"),
+                None,
+                None,
+            )
+        })? {
+            return Ok((status, false));
+        }
+        if cancellation.is_cancelled() {
+            let _ = child.kill();
+            let status = child.wait().map_err(|error| {
+                failure(
+                    ErrorCategory::Unavailable,
+                    true,
+                    format!("could not reap cancelled curl: {error}"),
+                    None,
+                    None,
+                )
+            })?;
+            return Ok((status, true));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn cancelled_failure() -> CurlFailure {
+    failure(
+        ErrorCategory::Cancelled,
+        false,
+        "provider request was cancelled".to_owned(),
+        None,
+        None,
+    )
 }
 
 fn curl_command(timeout_seconds: u64, max_response_bytes: usize) -> Command {
@@ -573,5 +666,21 @@ mod tests {
         assert!(SecretString::try_new("valid-key".to_owned()).is_ok());
         assert!(SecretString::try_new("line-one\nnext-directive".to_owned()).is_err());
         assert!(SecretString::try_new(String::new()).is_err());
+    }
+
+    #[test]
+    fn pre_cancelled_transport_never_starts_a_request() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let error = execute_curl_cancellable(
+            ["--url", "http://127.0.0.1:1/unreachable"],
+            1,
+            &[],
+            1024,
+            &cancellation,
+        )
+        .expect_err("pre-cancelled transport must fail");
+        assert_eq!(error.category(), ErrorCategory::Cancelled);
+        assert!(!error.is_retryable());
     }
 }

@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::error::Error;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 use voxtype::client::Client;
 use zbus::blocking::{Connection, Proxy, connection::Builder};
+use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{OwnedValue, Value};
 
 const TRAY_NAME: &str = "io.github.tinnci.VoxType.Tray";
@@ -13,7 +15,52 @@ type MenuProperties = HashMap<String, OwnedValue>;
 type MenuNode = (i32, MenuProperties, Vec<OwnedValue>);
 type MenuLayout = (u32, i32, MenuProperties, Vec<MenuNode>);
 
-struct TrayItem;
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrayPresentation {
+    status: &'static str,
+    icon_name: &'static str,
+}
+
+impl TrayPresentation {
+    fn from_daemon_status(status: &str) -> Self {
+        match status {
+            "preparing" => Self::active("microphone-sensitivity-medium"),
+            "listening" => Self::attention("microphone-sensitivity-high"),
+            "finalizing" => Self::active("content-loading"),
+            "inserting" => Self::active("insert-text"),
+            "unavailable" => Self::attention("dialog-error"),
+            _ => Self::active("audio-input-microphone"),
+        }
+    }
+
+    const fn active(icon_name: &'static str) -> Self {
+        Self {
+            status: "Active",
+            icon_name,
+        }
+    }
+
+    const fn attention(icon_name: &'static str) -> Self {
+        Self {
+            status: "NeedsAttention",
+            icon_name,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TrayItem {
+    presentation: Arc<RwLock<TrayPresentation>>,
+}
+
+impl TrayItem {
+    fn presentation(&self) -> TrayPresentation {
+        self.presentation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
 
 #[zbus::interface(name = "org.kde.StatusNotifierItem")]
 #[allow(
@@ -39,30 +86,12 @@ impl TrayItem {
 
     #[zbus(property)]
     fn status(&self) -> String {
-        current_status().map_or_else(
-            |_| "NeedsAttention".to_owned(),
-            |active| {
-                if active {
-                    "NeedsAttention".to_owned()
-                } else {
-                    "Active".to_owned()
-                }
-            },
-        )
+        self.presentation().status.to_owned()
     }
 
     #[zbus(property)]
     fn icon_name(&self) -> String {
-        current_status().map_or_else(
-            |_| "audio-input-microphone".to_owned(),
-            |active| {
-                if active {
-                    "microphone-sensitivity-high".to_owned()
-                } else {
-                    "audio-input-microphone".to_owned()
-                }
-            },
-        )
+        self.presentation().icon_name.to_owned()
     }
 
     #[zbus(property)]
@@ -88,6 +117,12 @@ impl TrayItem {
     fn context_menu(&self, x: i32, y: i32) {
         let _ = (x, y);
     }
+
+    #[zbus(signal, name = "NewStatus")]
+    async fn new_status(emitter: &SignalEmitter<'_>, status: &str) -> zbus::Result<()>;
+
+    #[zbus(signal, name = "NewIcon")]
+    async fn new_icon(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
 
 struct TrayMenu;
@@ -253,21 +288,17 @@ fn run_action<T>(name: &str, operation: impl FnOnce(&Client<'_>) -> zbus::Result
     }
 }
 
-fn current_status() -> zbus::Result<bool> {
-    with_client(|client| client.status().map(|status| is_active_status(&status)))
-}
-
-fn is_active_status(status: &str) -> bool {
-    matches!(
-        status,
-        "preparing" | "listening" | "finalizing" | "inserting"
-    )
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
+    let initial = read_presentation();
+    let presentation = Arc::new(RwLock::new(initial));
     let connection = Builder::session()?
         .name(TRAY_NAME)?
-        .serve_at(TRAY_PATH, TrayItem)?
+        .serve_at(
+            TRAY_PATH,
+            TrayItem {
+                presentation: Arc::clone(&presentation),
+            },
+        )?
         .serve_at(MENU_PATH, TrayMenu)?
         .build()?;
     let watcher = Proxy::new(
@@ -278,8 +309,50 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     watcher.call_method("RegisterStatusNotifierItem", &(TRAY_NAME))?;
     loop {
-        thread::sleep(Duration::from_secs(60));
+        thread::sleep(Duration::from_millis(400));
+        let next = read_presentation();
+        let previous = {
+            let mut current = presentation
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *current == next {
+                continue;
+            }
+            std::mem::replace(&mut *current, next.clone())
+        };
+        emit_presentation_change(&connection, &presentation, &previous, &next)?;
     }
+}
+
+fn read_presentation() -> TrayPresentation {
+    #[allow(clippy::redundant_closure_for_method_calls)]
+    with_client(|client| client.status()).map_or_else(
+        |_| TrayPresentation::from_daemon_status("unavailable"),
+        |status| TrayPresentation::from_daemon_status(&status),
+    )
+}
+
+fn emit_presentation_change(
+    connection: &Connection,
+    presentation: &Arc<RwLock<TrayPresentation>>,
+    previous: &TrayPresentation,
+    next: &TrayPresentation,
+) -> zbus::Result<()> {
+    let emitter = SignalEmitter::new(connection.inner(), TRAY_PATH)?;
+    let item = TrayItem {
+        presentation: Arc::clone(presentation),
+    };
+    zbus::block_on(async {
+        if previous.status != next.status {
+            item.status_changed(&emitter).await?;
+            TrayItem::new_status(&emitter, next.status).await?;
+        }
+        if previous.icon_name != next.icon_name {
+            item.icon_name_changed(&emitter).await?;
+            TrayItem::new_icon(&emitter).await?;
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -287,9 +360,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn listening_state_uses_active_tray_icon() {
-        assert!(is_active_status("listening"));
-        assert!(!is_active_status("idle"));
+    fn maps_each_user_visible_phase_to_a_distinct_presentation() {
+        let idle = TrayPresentation::from_daemon_status("idle");
+        let listening = TrayPresentation::from_daemon_status("listening");
+        let processing = TrayPresentation::from_daemon_status("finalizing");
+        let inserting = TrayPresentation::from_daemon_status("inserting");
+
+        assert_eq!(idle.status, "Active");
+        assert_eq!(listening.status, "NeedsAttention");
+        assert_ne!(idle.icon_name, listening.icon_name);
+        assert_ne!(listening.icon_name, processing.icon_name);
+        assert_ne!(processing.icon_name, inserting.icon_name);
+    }
+
+    #[test]
+    fn unavailable_daemon_is_visible_as_attention() {
+        let state = TrayPresentation::from_daemon_status("unavailable");
+        assert_eq!(state.status, "NeedsAttention");
+        assert_eq!(state.icon_name, "dialog-error");
     }
 
     #[test]

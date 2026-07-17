@@ -28,10 +28,10 @@ The general panel also exposes two safety/privacy controls:
   are erased when the option is disabled or the daemon exits.
 
 Insertion backends are `fcitx` (strict focus lock), `auto` (Fcitx when
-available, otherwise the explicit clipboard compatibility path), `clipboard`
-(copy plus authorized synthetic paste), and `copy` (clipboard only, with no
-keyboard injection). Copy-only mode is the safest portable fallback when an
-application does not expose a usable input-method context.
+available, otherwise copy-only), `clipboard` (explicit unsafe compatibility
+mode using copy plus authorized synthetic paste), and `copy` (clipboard only,
+with no keyboard injection). Copy-only mode is the safest portable fallback
+when an application does not expose a usable input-method context.
 
 ## Voice activity detection and trimming
 

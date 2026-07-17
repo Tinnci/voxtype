@@ -249,7 +249,7 @@ ApplicationWindow {
                                         ? qsTr("只复制识别结果，不模拟按键；适合无法安全注入的应用。")
                                         : backendBox.currentText === "clipboard"
                                             ? qsTr("通过剪贴板和 ydotool 粘贴，兼容性较高但不提供原生焦点锁定。")
-                                            : qsTr("优先使用 Fcitx；仅在录音开始时桥接不可用才选择剪贴板兼容路径。")
+                                            : qsTr("优先使用 Fcitx；桥接不可用时只复制结果，不会自动模拟粘贴。")
                                 wrapMode: Text.Wrap
                                 opacity: 0.65
                             }

@@ -284,6 +284,12 @@ quota fields are additive during version 0.x. Transcript history is memory-only,
 limited to twenty VoxType commits, and is never a general application-input
 history.
 
+`Stop` acknowledges the transition to `finalizing` after capture/VAD work has
+been accepted. Provider I/O runs in a cancellable background job; completion or
+failure is reflected by `Status`, while `Cancel` and status queries remain
+responsive. A worker result is applied only when its opaque session ID still
+matches the active finalizing session.
+
 The current API is request/response only. Transcript signals are intentionally
 absent until observer privacy and same-user access semantics are defined.
 

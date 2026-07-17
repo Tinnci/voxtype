@@ -22,6 +22,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Err(error) = daemon.enforce_recording_deadline() {
             eprintln!("voxtyped deadline handling failed: {error}");
         }
+        if let Err(error) = daemon.poll_recognition() {
+            eprintln!("voxtyped recognition failed: {error}");
+        }
         drop(daemon);
         drop(interface);
         thread::sleep(Duration::from_millis(100));

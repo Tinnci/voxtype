@@ -22,6 +22,13 @@ The session state machine owns cancellation and is the only component allowed
 to move a dictation request from idle through capture, recognition, insertion,
 and completion.
 
+After capture stops, provider work runs in a named background thread with a
+bounded one-result channel and a shared cancellation token. The D-Bus object
+remains available for status/cancel calls. The main owner applies a result only
+when its session ID still matches the current `finalizing` state; cancellation
+terminates curl or the complete command-provider process group and removes the
+recording path.
+
 ## System boundaries
 
 VoxType has four primary boundaries:

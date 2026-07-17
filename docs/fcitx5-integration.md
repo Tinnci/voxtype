@@ -75,12 +75,13 @@ appearing in the focused field is the required frontend delivery evidence.
 
 - `fcitx`: strict, focus-safe native commit; default;
 - `clipboard`: compatibility path using `wl-copy` and `ydotool`;
-- `auto`: prefer Fcitx and fall back to clipboard only when the bridge is
-  unavailable at session start.
+- `auto`: prefer Fcitx and fall back to copy-only when the bridge is unavailable
+  at session start.
 
-Once a session has been armed with Fcitx, a focus or security rejection never
-silently falls back to clipboard injection. This prevents text from landing in
-an unexpected application.
+Automatic selection never chooses synthetic paste. Once a session has been
+armed with Fcitx, a focus or security rejection also never falls back to
+clipboard injection. This prevents text from landing in an unexpected
+application.
 
 ## Verification boundary
 

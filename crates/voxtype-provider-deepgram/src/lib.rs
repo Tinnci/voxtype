@@ -4,8 +4,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use voxtype_core::{ErrorCategory, VoxError};
-pub use voxtype_provider_common::SecretString;
-use voxtype_provider_common::{DEFAULT_MAX_RESPONSE_BYTES, escape_curl_config, execute_curl};
+pub use voxtype_provider_common::{CancellationToken, SecretString};
+use voxtype_provider_common::{
+    DEFAULT_MAX_RESPONSE_BYTES, escape_curl_config, execute_curl_cancellable,
+};
 
 #[derive(Debug)]
 pub struct DeepgramConfig {
@@ -33,10 +35,25 @@ pub fn transcribe_pcm(
     pcm_path: &Path,
     language: &str,
 ) -> Result<Transcription, VoxError> {
+    transcribe_pcm_cancellable(config, pcm_path, language, &CancellationToken::new())
+}
+
+/// Transcribes PCM while allowing another thread to terminate the HTTP request.
+///
+/// # Errors
+///
+/// Returns the same errors as [`transcribe_pcm`], including a cancelled error
+/// when the supplied token is cancelled.
+pub fn transcribe_pcm_cancellable(
+    config: &DeepgramConfig,
+    pcm_path: &Path,
+    language: &str,
+    cancellation: &CancellationToken,
+) -> Result<Transcription, VoxError> {
     validate_endpoint(&config.endpoint)?;
     let wav_path =
         voxtype_provider_common::pcm_to_wav(pcm_path, "deepgram.wav").map_err(io_error)?;
-    let result = request(config, &wav_path, language);
+    let result = request(config, &wav_path, language, cancellation);
     let _remove_result = fs::remove_file(wav_path);
     result
 }
@@ -45,6 +62,7 @@ fn request(
     config: &DeepgramConfig,
     wav_path: &Path,
     language: &str,
+    cancellation: &CancellationToken,
 ) -> Result<Transcription, VoxError> {
     let url = request_url(config, language);
     let args = [
@@ -61,11 +79,12 @@ fn request(
         "header = \"Authorization: Token {}\"\nheader = \"Accept: application/json\"\n",
         escape_curl_config(config.api_key.expose())
     );
-    let response = execute_curl(
+    let response = execute_curl_cancellable(
         args,
         config.timeout_seconds,
         config_input.as_bytes(),
         DEFAULT_MAX_RESPONSE_BYTES,
+        cancellation,
     )
     .map_err(|error| error.into_vox_error("provider.deepgram.http_failed"))?;
 
