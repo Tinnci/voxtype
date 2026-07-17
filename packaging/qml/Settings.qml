@@ -12,6 +12,7 @@ ApplicationWindow {
     property bool messageError: false
     property var calibration: null
     property bool calibrating: false
+    property int activeEditors: 0
 
     width: 960
     height: 720
@@ -20,7 +21,7 @@ ApplicationWindow {
     visible: true
     title: qsTr("VoxType 设置")
 
-    function callApi(method, path, body, callback) {
+    function callApi(method, path, body, callback, silent) {
         const separator = path.indexOf("?") >= 0 ? "&" : "?"
         const request = new XMLHttpRequest()
         request.open(method, apiBase + path + separator + "token=" + sessionToken)
@@ -33,7 +34,7 @@ ApplicationWindow {
             try { result = JSON.parse(request.responseText) } catch (error) {}
             if (request.status >= 200 && request.status < 300) {
                 callback(result)
-            } else {
+            } else if (!silent) {
                 root.calibrating = false
                 root.messageError = true
                 root.message = result && result.error ? result.error : qsTr("设置请求失败")
@@ -48,6 +49,14 @@ ApplicationWindow {
             root.messageError = false
             root.message = successMessage || qsTr("设置已同步")
         })
+    }
+
+    function refreshQuietly() {
+        if (root.activeEditors > 0)
+            return
+        callApi("GET", "/state", "", function(result) {
+            root.state = result
+        }, true)
     }
 
     function nullableInteger(text) {
@@ -137,6 +146,30 @@ ApplicationWindow {
     }
 
     Component.onCompleted: refresh("")
+
+    Timer {
+        interval: 2000
+        repeat: true
+        running: root.visible
+        onTriggered: root.refreshQuietly()
+    }
+
+    component TrackedTextField: TextField {
+        property bool countedAsEditor: false
+        onActiveFocusChanged: {
+            if (activeFocus && !countedAsEditor) {
+                countedAsEditor = true
+                root.activeEditors += 1
+            } else if (!activeFocus && countedAsEditor) {
+                countedAsEditor = false
+                root.activeEditors = Math.max(0, root.activeEditors - 1)
+            }
+        }
+        Component.onDestruction: {
+            if (countedAsEditor)
+                root.activeEditors = Math.max(0, root.activeEditors - 1)
+        }
+    }
 
     component SummaryCard: Frame {
         property string heading: ""
@@ -562,7 +595,7 @@ ApplicationWindow {
                             rowSpacing: 8
 
                             Label { text: qsTr("标识") }
-                            TextField {
+                            TrackedTextField {
                                 id: newProviderId
                                 Layout.fillWidth: true
                                 placeholderText: "work-asr"
@@ -590,7 +623,7 @@ ApplicationWindow {
                             }
 
                             Label { text: qsTr("API 端点") }
-                            TextField {
+                            TrackedTextField {
                                 id: newProviderEndpoint
                                 Layout.fillWidth: true
                                 placeholderText: "https://…"
@@ -598,7 +631,7 @@ ApplicationWindow {
                             Item { Layout.preferredWidth: 1 }
 
                             Label { text: qsTr("模型") }
-                            TextField {
+                            TrackedTextField {
                                 id: newProviderModel
                                 Layout.fillWidth: true
                                 placeholderText: newProviderKind.currentText === "deepgram" ? "nova-3" : "gpt-4o-mini-transcribe"
@@ -606,7 +639,7 @@ ApplicationWindow {
                             Item { Layout.preferredWidth: 1 }
 
                             Label { text: qsTr("语言") }
-                            TextField {
+                            TrackedTextField {
                                 id: newProviderLanguage
                                 Layout.fillWidth: true
                                 text: "zh"
@@ -692,7 +725,7 @@ ApplicationWindow {
                                     columnSpacing: 10
                                     rowSpacing: 8
                                     Label { text: qsTr("API 端点") }
-                                    TextField {
+                                    TrackedTextField {
                                         id: endpointInput
                                         Layout.fillWidth: true
                                         text: modelData.endpoint
@@ -702,7 +735,7 @@ ApplicationWindow {
                                     }
                                     Item { Layout.preferredWidth: 1 }
                                     Label { text: qsTr("模型") }
-                                    TextField {
+                                    TrackedTextField {
                                         id: modelInput
                                         Layout.fillWidth: true
                                         text: modelData.model
@@ -760,7 +793,7 @@ ApplicationWindow {
                                         anchors.fill: parent
                                         anchors.margins: 10
                                         Label { text: modelData.secret_ref; font.family: "monospace" }
-                                        TextField {
+                                        TrackedTextField {
                                             id: secretInput
                                             Layout.fillWidth: true
                                             placeholderText: qsTr("输入新 API 密钥")
@@ -900,21 +933,21 @@ ApplicationWindow {
                                 RowLayout {
                                     Layout.fillWidth: true
                                     Label { text: qsTr("软限额") }
-                                    TextField {
+                                    TrackedTextField {
                                         id: requestLimit
                                         placeholderText: qsTr("请求数")
                                         text: modelData.quota.request_limit === null ? "" : String(modelData.quota.request_limit)
                                         validator: IntValidator { bottom: 1 }
                                         Layout.preferredWidth: 130
                                     }
-                                    TextField {
+                                    TrackedTextField {
                                         id: audioLimit
                                         placeholderText: qsTr("音频秒")
                                         text: modelData.quota.audio_seconds_limit === null ? "" : String(modelData.quota.audio_seconds_limit)
                                         validator: IntValidator { bottom: 1 }
                                         Layout.preferredWidth: 130
                                     }
-                                    TextField {
+                                    TrackedTextField {
                                         id: tokenLimit
                                         placeholderText: qsTr("Token")
                                         text: modelData.quota.token_limit === null ? "" : String(modelData.quota.token_limit)
