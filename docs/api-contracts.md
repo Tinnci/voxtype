@@ -291,6 +291,7 @@ UsageStatus() -> (s json)
 LastTranscript() -> (s text)
 TranscriptHistory() -> (as texts)
 CheckLastGrammar() -> (s report)
+CheckContextGrammar() -> (s report)
 ClearHistory() -> ()
 ReloadConfiguration() -> ()
 InsertTest(s text) -> (s result)
@@ -327,6 +328,12 @@ finalizing session.
 Transcript and partial-result signals are intentionally absent until observer
 privacy and same-user access semantics are defined.
 
+`CheckContextGrammar` is an explicit user action. It reads at most 4096
+characters from the focused Fcitx context, prefers the current selection, and
+otherwise reviews at most 1200 characters before the cursor. Sensitive fields
+are rejected by the addon and the snapshot is never stored in transcript
+history.
+
 ### Error names
 
 ```text
@@ -347,12 +354,14 @@ insertion implementation.
 ```text
 voxtype start [PROFILE]
 voxtype stop [SESSION]
+voxtype stop --wait [SESSION]
 voxtype toggle [PROFILE]
 voxtype cancel [SESSION]
 voxtype status
 voxtype providers
 voxtype usage
-voxtype grammar last|show|history|clear
+voxtype grammar context|last|show|history|clear
+voxtype fcitx-context
 voxtype doctor [audio|shortcut|provider|insertion|all]
 voxtype config path|validate
 voxtype secret set NAME

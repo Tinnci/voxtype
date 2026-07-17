@@ -73,7 +73,8 @@ Default Plasma shortcuts:
 - `Meta+Alt+S`: start dictation;
 - `Meta+Alt+X`: stop dictation;
 - `Meta+Alt+Escape`: cancel dictation.
-- `Meta+Alt+G`: check the most recently inserted transcript locally.
+- `Meta+Alt+G`: locally review selected text, or bounded text before the cursor,
+  from the focused non-sensitive Fcitx context.
 
 Run `voxtype doctor shortcut` to inspect KGlobalAccel directly. It reports the
 current and default sequence for each action and distinguishes a missing

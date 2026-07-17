@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include <array>
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
@@ -9,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -28,6 +30,7 @@ namespace fcitx {
 namespace {
 
 constexpr std::size_t MaxDatagramSize = 64 * 1024;
+constexpr std::size_t MaxContextCharacters = 4096;
 
 std::string runtimeSocketPath() {
     const char *runtime = std::getenv("XDG_RUNTIME_DIR");
@@ -78,6 +81,67 @@ std::uint64_t textFingerprint(std::string_view text) {
     return value;
 }
 
+std::size_t utf8CharacterCount(std::string_view text) {
+    return static_cast<std::size_t>(std::count_if(
+        text.begin(), text.end(), [](const char character) {
+            return (static_cast<unsigned char>(character) & 0xC0U) != 0x80U;
+        }));
+}
+
+std::size_t byteOffset(std::string_view text, std::size_t characterOffset) {
+    std::size_t characters = 0;
+    for (std::size_t index = 0; index < text.size(); ++index) {
+        if ((static_cast<unsigned char>(text[index]) & 0xC0U) != 0x80U) {
+            if (characters == characterOffset) {
+                return index;
+            }
+            ++characters;
+        }
+    }
+    return text.size();
+}
+
+struct ContextWindow {
+    std::string text;
+    std::size_t cursor = 0;
+    std::size_t anchor = 0;
+    bool truncated = false;
+};
+
+ContextWindow boundedContext(std::string_view text, std::size_t cursor,
+                             std::size_t anchor) {
+    const auto characters = utf8CharacterCount(text);
+    cursor = std::min(cursor, characters);
+    anchor = std::min(anchor, characters);
+    std::size_t start = 0;
+    std::size_t end = characters;
+    if (characters > MaxContextCharacters) {
+        const auto center = cursor / 2 + anchor / 2 + (cursor % 2 + anchor % 2) / 2;
+        start = center > MaxContextCharacters / 2
+                    ? center - MaxContextCharacters / 2
+                    : 0;
+        end = std::min(characters, start + MaxContextCharacters);
+        start = end - MaxContextCharacters;
+    }
+    const auto byteStart = byteOffset(text, start);
+    const auto byteEnd = byteOffset(text, end);
+    return ContextWindow{std::string(text.substr(byteStart, byteEnd - byteStart)),
+                         std::clamp(cursor, start, end) - start,
+                         std::clamp(anchor, start, end) - start,
+                         start != 0 || end != characters};
+}
+
+void appendCapability(std::string &value, bool enabled,
+                      std::string_view capability) {
+    if (!enabled) {
+        return;
+    }
+    if (!value.empty()) {
+        value.push_back(',');
+    }
+    value.append(capability);
+}
+
 } // namespace
 
 class VoxTypeBridgeConfig final : public Configuration {
@@ -95,6 +159,7 @@ class VoxTypeBridge final : public AddonInstance {
 public:
     explicit VoxTypeBridge(Instance *instance) : instance_(instance) {
         openSocket();
+        watchContextEvents();
     }
 
     ~VoxTypeBridge() override {
@@ -166,6 +231,17 @@ private:
         FCITX_INFO() << "VoxType input-context bridge ready";
     }
 
+    void watchContextEvents() {
+        for (const auto type : {EventType::InputContextFocusIn,
+                                EventType::InputContextFocusOut,
+                                EventType::InputContextSurroundingTextUpdated,
+                                EventType::InputContextCapabilityChanged}) {
+            contextWatchers_.push_back(instance_->watchEvent(
+                type, EventWatcherPhase::PostInputMethod,
+                [this](Event &) { contextGeneration_++; }));
+        }
+    }
+
     void receive() {
         std::array<char, MaxDatagramSize> buffer{};
         sockaddr_un sender{};
@@ -186,6 +262,8 @@ private:
         std::string response;
         if (command == "PING") {
             response = fcitx::response("OK", "ready");
+        } else if (command == "CONTEXT") {
+            response = context();
         } else if (command == "ARM") {
             response = arm(field(message, 1));
         } else if (command == "COMMIT") {
@@ -219,6 +297,53 @@ private:
         response.push_back('\0');
         response += context->frontendName();
         return response;
+    }
+
+    std::string context() const {
+        auto *context = instance_->lastFocusedInputContext();
+        if (!context || !context->hasFocus()) {
+            return response("ERR", "no-focused-context");
+        }
+        if (isSecure(context)) {
+            return response("ERR", "secure-context");
+        }
+        const auto flags = context->capabilityFlags();
+        std::string capabilities;
+        appendCapability(capabilities, flags.test(CapabilityFlag::SurroundingText),
+                         "surrounding-text");
+        appendCapability(capabilities, flags.test(CapabilityFlag::Multiline),
+                         "multiline");
+        appendCapability(capabilities, flags.test(CapabilityFlag::Terminal),
+                         "terminal");
+        appendCapability(capabilities, flags.test(CapabilityFlag::SpellCheck),
+                         "spell-check");
+
+        ContextWindow window;
+        const auto &surrounding = context->surroundingText();
+        if (flags.test(CapabilityFlag::SurroundingText) && surrounding.isValid()) {
+            if (surrounding.text().find('\0') != std::string::npos) {
+                return response("ERR", "unsupported-text");
+            }
+            window = boundedContext(surrounding.text(), surrounding.cursor(),
+                                    surrounding.anchor());
+        }
+        std::string value{"OK\0context\0", 11};
+        value += context->program();
+        value.push_back('\0');
+        value += context->frontendName();
+        value.push_back('\0');
+        value += std::to_string(contextGeneration_);
+        value.push_back('\0');
+        value += std::to_string(window.cursor);
+        value.push_back('\0');
+        value += std::to_string(window.anchor);
+        value.push_back('\0');
+        value += capabilities;
+        value.push_back('\0');
+        value += window.truncated ? "1" : "0";
+        value.push_back('\0');
+        value += window.text;
+        return value;
     }
 
     void commit(std::string_view session, std::string_view text,
@@ -414,6 +539,8 @@ private:
     std::size_t completedTextSize_ = 0;
     std::uint64_t completedTextFingerprint_ = 0;
     std::string completedResponse_;
+    std::uint64_t contextGeneration_ = 1;
+    std::vector<std::unique_ptr<HandlerTableEntry<EventHandler>>> contextWatchers_;
 };
 
 class VoxTypeBridgeFactory final : public AddonFactory {

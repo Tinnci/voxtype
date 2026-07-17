@@ -35,9 +35,9 @@ Icon=process-stop
 X-KDE-Shortcuts=Meta+Alt+Escape
 
 [Desktop Action Grammar]
-Name=Check Recent Grammar
-Name[zh_CN]=整理最近输入的文本
-Exec=voxtype grammar last
+Name=Review Focused Text
+Name[zh_CN]=整理当前输入框文本
+Exec=voxtype grammar context
 Icon=tools-check-spelling
 
 [Desktop Action Settings]

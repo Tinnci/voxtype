@@ -140,6 +140,21 @@ fn run() -> Result<(), Box<dyn Error>> {
             let target = FcitxBridge.probe()?;
             println!("program={} frontend={}", target.program, target.frontend);
         }
+        "fcitx-context" => {
+            let context = FcitxBridge.context()?;
+            println!(
+                "program={} frontend={} generation={} chars={} cursor={} anchor={} selected_chars={} truncated={} capabilities={}",
+                context.target.program,
+                context.target.frontend,
+                context.generation,
+                context.text.chars().count(),
+                context.cursor,
+                context.anchor,
+                context.cursor.abs_diff(context.anchor),
+                context.truncated,
+                context.capabilities.join(",")
+            );
+        }
         "fcitx-insert-test" => {
             if client.status()? != "idle" {
                 return Err("fcitx insertion testing requires an idle daemon".into());
@@ -189,12 +204,13 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype usage\n  voxtype grammar last|show|history|clear\n  voxtype fcitx-focus\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype stop --wait [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio|shortcut|insertion|provider|all]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
+        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype usage\n  voxtype grammar context|last|show|history|clear\n  voxtype fcitx-focus\n  voxtype fcitx-context\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype stop --wait [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio|shortcut|insertion|provider|all]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
     );
 }
 
 fn grammar_command(client: &Client<'_>, action: &str) -> Result<(), Box<dyn Error>> {
     match action {
+        "context" => println!("{}", client.check_context_grammar()?),
         "last" => println!("{}", client.check_last_grammar()?),
         "show" => println!("{}", client.last_transcript()?),
         "history" => {
@@ -203,7 +219,7 @@ fn grammar_command(client: &Client<'_>, action: &str) -> Result<(), Box<dyn Erro
             }
         }
         "clear" => client.clear_history()?,
-        _ => return Err("usage: voxtype grammar last|show|history|clear".into()),
+        _ => return Err("usage: voxtype grammar context|last|show|history|clear".into()),
     }
     Ok(())
 }

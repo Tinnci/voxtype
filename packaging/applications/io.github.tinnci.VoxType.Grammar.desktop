@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=VoxType Local Text Cleanup
-Name[zh_CN]=VoxType 最近输入文本整理
-Comment=Check the most recently inserted VoxType transcript locally
-Comment[zh_CN]=在本地检查 VoxType 最近插入的文本
-Exec=voxtype grammar last
+Name=VoxType Focused Text Cleanup
+Name[zh_CN]=VoxType 当前输入文本整理
+Comment=Review selected or preceding text from the focused input context locally
+Comment[zh_CN]=在本地整理当前输入框中选中或光标前的文本
+Exec=voxtype grammar context
 Icon=tools-check-spelling
 Terminal=false
 NoDisplay=true

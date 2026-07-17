@@ -7,10 +7,13 @@ stable native addon API is C++.
 ## What the addon does
 
 - creates `$XDG_RUNTIME_DIR/voxtype/fcitx.sock` with mode `0600`;
-- accepts `ARM`, legacy `COMMIT`, idempotent `COMMIT2`, `CANCEL`, and `PING`
-  datagrams from the same user;
+- accepts `ARM`, bounded `CONTEXT`, legacy `COMMIT`, idempotent `COMMIT2`,
+  `CANCEL`, and `PING` datagrams from the same user;
 - records the currently focused Fcitx `InputContext` at `ARM`;
 - rejects Password/Sensitive contexts;
+- exposes at most 4096 UTF-8 characters of valid surrounding text with adjusted
+  character-based cursor/anchor offsets, capability names, truncation state,
+  and a generation incremented on focus/capability/text updates;
 - rechecks focus, context identity, and secure flags before committing;
 - acknowledges dispatch only after the deferred `commitString` call passes its
   final focus/security check. This proves delivery to the Fcitx input-context
@@ -78,6 +81,11 @@ The command uses the native bridge only. It does not mutate the clipboard or
 fall back to synthetic paste. `dispatched=true` proves the final Fcitx call ran;
 the text appearing in the focused field is the required frontend delivery
 evidence.
+
+`voxtype fcitx-context` prints snapshot metadata without printing application
+text. `voxtype grammar context` explicitly reviews selected text, or at most
+1200 characters before the cursor, using the local cleanup rules. Password and
+Sensitive contexts return an error before any text is copied into Rust.
 
 ## Backend selection
 

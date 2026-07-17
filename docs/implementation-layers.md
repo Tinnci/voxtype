@@ -144,8 +144,9 @@ doubles at protocol and process boundaries so failure behavior remains testable.
   demo-only profile is now rejected by the normal no-profile start action;
   developers may still name that profile explicitly for insertion integration
   tests. First-run UI must lead to a real cloud or local provider.
-- The overlay must not advertise recent-text checking while transcript history
-  is disabled. Retaining prior input requires an explicit privacy decision.
+- Focused-text cleanup now reads a bounded Fcitx snapshot only after the
+  explicit shortcut and never stores it. VoxType transcript history remains a
+  separate opt-in memory feature for `grammar last/history`.
 - Any provider `success` must come from a parsed non-empty provider response or
   a real local command result, never a generated sample string.
 - Provider readiness must not call a configured secret or an untripped circuit
@@ -190,9 +191,10 @@ doubles at protocol and process boundaries so failure behavior remains testable.
   are not push-to-talk.
 - Fcitx `COMMIT2` now uses a bounded request ID, one safe retry, in-flight
   recipient replacement, and a cached terminal response. Lost ACKs therefore
-  do not require duplicate dispatch. Surrounding text, cursor, selection,
-  capabilities, and focus generation are still required before checking text
-  that predates VoxType's private transcript history.
+  do not require duplicate dispatch. `CONTEXT` now exposes bounded surrounding
+  text, cursor, selection, capabilities, truncation, and context generation for
+  an explicit local cleanup action while rejecting sensitive fields. Proactive
+  focus-loss notification remains future work.
 
 ### Keep as test doubles
 

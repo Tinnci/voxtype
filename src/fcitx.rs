@@ -19,6 +19,30 @@ pub struct FcitxTarget {
     pub frontend: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FcitxContext {
+    pub target: FcitxTarget,
+    pub generation: u64,
+    pub cursor: usize,
+    pub anchor: usize,
+    pub capabilities: Vec<String>,
+    pub truncated: bool,
+    pub text: String,
+}
+
+impl FcitxContext {
+    /// Returns the selected text, or up to 1200 characters before the cursor.
+    #[must_use]
+    pub fn review_text(&self) -> String {
+        let start = self.cursor.min(self.anchor);
+        let end = self.cursor.max(self.anchor);
+        if start != end {
+            return slice_characters(&self.text, start, end);
+        }
+        slice_characters(&self.text, self.cursor.saturating_sub(1_200), self.cursor)
+    }
+}
+
 impl FcitxBridge {
     /// Verifies that the Fcitx addon is available.
     ///
@@ -60,6 +84,17 @@ impl FcitxBridge {
         let target = self.arm_target(&session)?;
         self.cancel(&session);
         Ok(target)
+    }
+
+    /// Reads a bounded, non-sensitive snapshot from the focused input context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when focus is unavailable, the field is sensitive, or
+    /// the frontend does not provide a valid context response.
+    pub fn context(self) -> Result<FcitxContext, VoxError> {
+        let response = request(&[b"CONTEXT"])?;
+        parse_context_response(&response)
     }
 
     /// Arms and dispatches a diagnostic commit to the currently focused context.
@@ -126,6 +161,77 @@ fn parse_arm_response(response: &[u8]) -> Result<FcitxTarget, VoxError> {
     let program = parse_identity_field(fields.next())?;
     let frontend = parse_identity_field(fields.next())?;
     Ok(FcitxTarget { program, frontend })
+}
+
+fn parse_context_response(response: &[u8]) -> Result<FcitxContext, VoxError> {
+    expect_ok(response)?;
+    let mut fields = response.split(|byte| *byte == 0);
+    let _status = fields.next();
+    if fields.next() != Some(b"context".as_slice()) {
+        return Err(invalid_response(
+            "Fcitx bridge response is not a context snapshot",
+        ));
+    }
+    let program = parse_identity_field(fields.next())?;
+    let frontend = parse_identity_field(fields.next())?;
+    let generation = parse_number(fields.next(), "context generation")?;
+    let cursor = usize::try_from(parse_number(fields.next(), "cursor")?)
+        .map_err(|_| invalid_response("Fcitx cursor is out of range"))?;
+    let anchor = usize::try_from(parse_number(fields.next(), "anchor")?)
+        .map_err(|_| invalid_response("Fcitx anchor is out of range"))?;
+    let capabilities = parse_utf8(fields.next(), "capabilities")?
+        .split(',')
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let truncated = match fields.next() {
+        Some(b"0") => false,
+        Some(b"1") => true,
+        _ => return Err(invalid_response("Fcitx truncation flag is invalid")),
+    };
+    let text = parse_utf8(fields.next(), "surrounding text")?.to_owned();
+    let characters = text.chars().count();
+    if characters > 4_096 || cursor > characters || anchor > characters {
+        return Err(invalid_response(
+            "Fcitx surrounding text or cursor exceeds the bounded context",
+        ));
+    }
+    Ok(FcitxContext {
+        target: FcitxTarget { program, frontend },
+        generation,
+        cursor,
+        anchor,
+        capabilities,
+        truncated,
+        text,
+    })
+}
+
+fn parse_number(field: Option<&[u8]>, name: &str) -> Result<u64, VoxError> {
+    parse_utf8(field, name)?
+        .parse()
+        .map_err(|_| invalid_response(&format!("Fcitx {name} is invalid")))
+}
+
+fn parse_utf8<'a>(field: Option<&'a [u8]>, name: &str) -> Result<&'a str, VoxError> {
+    let field = field.ok_or_else(|| invalid_response(&format!("Fcitx {name} is missing")))?;
+    std::str::from_utf8(field)
+        .map_err(|_| invalid_response(&format!("Fcitx {name} contains invalid UTF-8")))
+}
+
+fn invalid_response(message: &str) -> VoxError {
+    VoxError::new(
+        ErrorCategory::Protocol,
+        "fcitx.invalid_response",
+        message.to_owned(),
+    )
+}
+
+fn slice_characters(text: &str, start: usize, end: usize) -> String {
+    text.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }
 
 fn parse_identity_field(field: Option<&[u8]>) -> Result<String, VoxError> {
@@ -199,7 +305,7 @@ fn request_message_at(message: &[u8], runtime: &std::path::Path) -> Result<Vec<u
     socket
         .send_to(message, runtime.join("fcitx.sock"))
         .map_err(transport_io)?;
-    let mut response = vec![0_u8; 4 * 1024];
+    let mut response = vec![0_u8; 20 * 1024];
     let size = socket.recv(&mut response).map_err(transport_io)?;
     response.truncate(size);
     Ok(response)
@@ -378,6 +484,47 @@ mod tests {
         let target = parse_arm_response(b"OK\0armed\0kate\0wayland").expect("target response");
         assert_eq!(target.program, "kate");
         assert_eq!(target.frontend, "wayland");
+    }
+
+    #[test]
+    fn parses_bounded_context_and_selection() {
+        let response = encode_message(&[
+            b"OK",
+            b"context",
+            b"kate",
+            b"wayland",
+            b"42",
+            b"3",
+            b"1",
+            b"surrounding-text,multiline",
+            b"0",
+            "abc中".as_bytes(),
+        ])
+        .expect("response encoding");
+        let context = parse_context_response(&response).expect("context response");
+        assert_eq!(context.generation, 42);
+        assert_eq!(context.cursor, 3);
+        assert_eq!(context.anchor, 1);
+        assert_eq!(context.review_text(), "bc");
+        assert_eq!(context.text, "abc中");
+        assert!(context.capabilities.contains(&"multiline".to_owned()));
+    }
+
+    #[test]
+    fn context_without_selection_returns_text_before_cursor() {
+        let context = FcitxContext {
+            target: FcitxTarget {
+                program: "kate".to_owned(),
+                frontend: "wayland".to_owned(),
+            },
+            generation: 1,
+            cursor: 4,
+            anchor: 4,
+            capabilities: vec!["surrounding-text".to_owned()],
+            truncated: false,
+            text: "前文内容后文".to_owned(),
+        };
+        assert_eq!(context.review_text(), "前文内容");
     }
 
     #[test]

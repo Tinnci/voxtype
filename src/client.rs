@@ -81,6 +81,16 @@ impl<'a> Client<'a> {
         self.proxy.call("CheckLastGrammar", &())
     }
 
+    /// Checks local cleanup rules against the focused Fcitx surrounding text.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error for missing focus, sensitive fields, unsupported
+    /// surrounding text, or an empty review window.
+    pub fn check_context_grammar(&self) -> zbus::Result<String> {
+        self.proxy.call("CheckContextGrammar", &())
+    }
+
     /// Clears the in-memory recent transcript.
     ///
     /// # Errors

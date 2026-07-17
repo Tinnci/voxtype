@@ -330,6 +330,54 @@ impl VoxTypeDaemon {
         Ok(report.render())
     }
 
+    #[allow(clippy::unused_self)] // Public D-Bus action intentionally has no daemon-held text state.
+    fn check_context_grammar(&self) -> fdo::Result<String> {
+        let context = match FcitxBridge.context() {
+            Ok(context) => context,
+            Err(error) => {
+                overlay("error", "Focused text unavailable", error.message(), 3_000);
+                return Err(map_error(error));
+            }
+        };
+        let text = context.review_text();
+        if text.trim().is_empty() {
+            overlay(
+                "grammar",
+                "No focused text to review",
+                "Select text or place the cursor after a paragraph",
+                3_000,
+            );
+            return Err(fdo::Error::Failed(
+                "the focused input context has no reviewable text".to_owned(),
+            ));
+        }
+        let report = grammar::check(&text);
+        let body = if report.is_clean() {
+            format!("{} · no local cleanup issues", context.target.program)
+        } else {
+            format!(
+                "{} · {}",
+                context.target.program,
+                report
+                    .issues
+                    .iter()
+                    .take(2)
+                    .map(|issue| issue.message)
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            )
+        };
+        overlay("grammar", "Focused text cleanup", &body, 5_000);
+        Ok(format!(
+            "source=fcitx program={} frontend={} generation={} truncated={} {}",
+            context.target.program,
+            context.target.frontend,
+            context.generation,
+            context.truncated,
+            report.render()
+        ))
+    }
+
     fn clear_history(&mut self) {
         self.transcript_history.clear();
     }
@@ -1038,11 +1086,7 @@ impl VoxTypeDaemon {
             );
         } else {
             notify("VoxType", "Dictation dispatched");
-            let detail = if self.config.desktop.transcript_history_enabled {
-                "Sent to the focused input path · Meta+Alt+G checks recent text"
-            } else {
-                "Sent to the focused input path · transcript history is off"
-            };
+            let detail = "Sent to the focused input path · Meta+Alt+G reviews focused text";
             overlay("done", "Text dispatched", detail, 2_000);
         }
         Ok(format!(
