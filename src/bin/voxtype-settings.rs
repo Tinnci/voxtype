@@ -226,75 +226,27 @@ fn settings_state() -> io::Result<Value> {
         .ok()
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())
         .unwrap_or_else(|| json!({"scope": "unavailable", "providers": {}}));
+    let provider_health = Connection::session()
+        .and_then(|connection| {
+            let client = Client::connect(&connection)?;
+            client.provider_status()
+        })
+        .unwrap_or_default();
     let providers = config
         .providers
         .iter()
         .map(|(id, provider)| {
-            let (kind, endpoint, model, secret_ref, state, timeout_seconds, smart_format) =
-                match provider {
-                    ProviderConfig::Mock { .. } => {
-                        ("mock", "", "", "", "not-required", Value::Null, Value::Null)
-                    }
-                    ProviderConfig::OpenaiCompatible {
-                        endpoint,
-                        model,
-                        secret,
-                        timeout_seconds,
-                        ..
-                    } => (
-                        "openai-compatible",
-                        endpoint.as_str(),
-                        model.as_str(),
-                        secret.as_str(),
-                        secret_state(secret),
-                        json!(timeout_seconds),
-                        Value::Null,
-                    ),
-                    ProviderConfig::Deepgram {
-                        endpoint,
-                        model,
-                        secret,
-                        timeout_seconds,
-                        smart_format,
-                    } => (
-                        "deepgram",
-                        endpoint.as_str(),
-                        model.as_str(),
-                        secret.as_str(),
-                        secret_state(secret),
-                        json!(timeout_seconds),
-                        json!(smart_format),
-                    ),
-                    ProviderConfig::Command {
-                        program,
-                        timeout_seconds,
-                        ..
-                    } => (
-                        "command",
-                        program.as_str(),
-                        "",
-                        "",
-                        "not-required",
-                        json!(timeout_seconds),
-                        Value::Null,
-                    ),
-                };
             let live_usage = usage
                 .pointer(&format!("/providers/{}/usage", json_pointer_escape(id)))
                 .cloned()
                 .unwrap_or_else(empty_usage);
-            json!({
-                "id": id,
-                "kind": kind,
-                "endpoint": endpoint,
-                "model": model,
-                "secret_ref": secret_ref,
-                "secret_state": state,
-                "timeout_seconds": timeout_seconds,
-                "smart_format": smart_format,
-                "usage": live_usage,
-                "quota": config.quotas.get(id).cloned().unwrap_or_default(),
-            })
+            provider_state(
+                id,
+                provider,
+                &live_usage,
+                config.quotas.get(id),
+                provider_health_for(&provider_health, id),
+            )
         })
         .collect::<Vec<_>>();
     Ok(json!({
@@ -316,6 +268,119 @@ fn settings_state() -> io::Result<Value> {
         },
         "providers": providers,
     }))
+}
+
+fn provider_state(
+    id: &str,
+    provider: &ProviderConfig,
+    usage: &Value,
+    quota: Option<&ProviderQuotaConfig>,
+    health: &str,
+) -> Value {
+    let (kind, endpoint, model, secret_ref, secret_state, timeout_seconds, smart_format) =
+        match provider {
+            ProviderConfig::Mock { .. } => {
+                ("mock", "", "", "", "not-required", Value::Null, Value::Null)
+            }
+            ProviderConfig::OpenaiCompatible {
+                endpoint,
+                model,
+                secret,
+                timeout_seconds,
+                ..
+            } => (
+                "openai-compatible",
+                endpoint.as_str(),
+                model.as_str(),
+                secret.as_str(),
+                secret_state(secret),
+                json!(timeout_seconds),
+                Value::Null,
+            ),
+            ProviderConfig::Deepgram {
+                endpoint,
+                model,
+                secret,
+                timeout_seconds,
+                smart_format,
+            } => (
+                "deepgram",
+                endpoint.as_str(),
+                model.as_str(),
+                secret.as_str(),
+                secret_state(secret),
+                json!(timeout_seconds),
+                json!(smart_format),
+            ),
+            ProviderConfig::Command {
+                program,
+                timeout_seconds,
+                ..
+            } => (
+                "command",
+                program.as_str(),
+                "",
+                "",
+                "not-required",
+                json!(timeout_seconds),
+                Value::Null,
+            ),
+        };
+    json!({
+        "id": id,
+        "kind": kind,
+        "endpoint": endpoint,
+        "model": model,
+        "secret_ref": secret_ref,
+        "secret_state": secret_state,
+        "readiness": provider_readiness(kind, secret_state, health),
+        "health": health,
+        "timeout_seconds": timeout_seconds,
+        "smart_format": smart_format,
+        "usage": usage,
+        "quota": quota.cloned().unwrap_or_default(),
+    })
+}
+
+fn provider_health_for<'a>(status: &'a str, provider_id: &str) -> &'a str {
+    status
+        .split_whitespace()
+        .find_map(|entry| {
+            let (id, health) = entry.split_once(":available=")?;
+            (id == provider_id).then_some(health)
+        })
+        .unwrap_or("unknown")
+}
+
+fn provider_readiness(kind: &str, secret_state: &str, health: &str) -> &'static str {
+    if kind == "mock" {
+        return "demo";
+    }
+    if matches!(secret_state, "missing" | "unavailable") {
+        return "setup-needed";
+    }
+    if health.starts_with("false") {
+        return "unavailable";
+    }
+    if health.starts_with("true") && provider_failure_count(health) > 0 {
+        return "degraded";
+    }
+    if health.starts_with("true") {
+        return "healthy";
+    }
+    if kind == "command" {
+        "configured"
+    } else {
+        "unknown"
+    }
+}
+
+fn provider_failure_count(health: &str) -> u32 {
+    health
+        .split(',')
+        .find_map(|field| field.strip_prefix("failures="))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default()
 }
 
 fn needs_provider_onboarding(config: &Config) -> bool {
@@ -795,5 +860,44 @@ text = "demo"
         assert_eq!(microphone_level_status(100), "too-quiet");
         assert_eq!(microphone_level_status(2_000), "ok");
         assert_eq!(microphone_level_status(32_000), "clipping");
+    }
+
+    #[test]
+    fn exposes_provider_readiness_without_calling_configured_count_ready() {
+        assert_eq!(
+            provider_health_for(
+                "mock:available=true cloud:available=false,failures=3",
+                "cloud"
+            ),
+            "false,failures=3"
+        );
+        assert_eq!(
+            provider_health_for("cloud:available=true,failures=1", "missing"),
+            "unknown"
+        );
+        assert_eq!(
+            provider_readiness("mock", "not-required", "unknown"),
+            "demo"
+        );
+        assert_eq!(
+            provider_readiness("deepgram", "missing", "unknown"),
+            "setup-needed"
+        );
+        assert_eq!(
+            provider_readiness("deepgram", "configured", "false,failures=3"),
+            "unavailable"
+        );
+        assert_eq!(
+            provider_readiness("deepgram", "configured", "true,failures=1"),
+            "degraded"
+        );
+        assert_eq!(
+            provider_readiness("deepgram", "configured", "true,failures=0"),
+            "healthy"
+        );
+        assert_eq!(
+            provider_readiness("command", "not-required", "unknown"),
+            "configured"
+        );
     }
 }

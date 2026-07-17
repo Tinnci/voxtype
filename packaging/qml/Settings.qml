@@ -75,6 +75,46 @@ ApplicationWindow {
         return count
     }
 
+    function usableProviderCount() {
+        if (!state)
+            return 0
+        let count = 0
+        for (let i = 0; i < state.providers.length; ++i) {
+            const readiness = state.providers[i].readiness
+            if (readiness === "healthy" || readiness === "configured" || readiness === "degraded")
+                ++count
+        }
+        return count
+    }
+
+    function providerAttentionCount() {
+        if (!state)
+            return 0
+        let count = 0
+        for (let i = 0; i < state.providers.length; ++i) {
+            const readiness = state.providers[i].readiness
+            if (readiness === "setup-needed" || readiness === "unavailable" || readiness === "degraded")
+                ++count
+        }
+        return count
+    }
+
+    function readinessText(readiness) {
+        if (readiness === "healthy") return qsTr("可用")
+        if (readiness === "configured") return qsTr("已配置 · 未探测")
+        if (readiness === "degraded") return qsTr("可用 · 最近有失败")
+        if (readiness === "unavailable") return qsTr("暂时不可用")
+        if (readiness === "setup-needed") return qsTr("需要完成设置")
+        if (readiness === "demo") return qsTr("演示模式")
+        return qsTr("状态未知")
+    }
+
+    function readinessColor(readiness) {
+        if (readiness === "healthy" || readiness === "configured") return "#22c55e"
+        if (readiness === "degraded" || readiness === "demo" || readiness === "unknown") return "#f59e0b"
+        return "#ef4444"
+    }
+
     function formatAudio(millis) {
         return (Number(millis) / 1000).toFixed(1) + " s"
     }
@@ -195,9 +235,12 @@ ApplicationWindow {
                         Layout.topMargin: 18
                         spacing: 12
                         SummaryCard {
-                            heading: qsTr("Provider")
-                            valueText: root.state ? String(root.state.providers.length) : "—"
-                            detail: qsTr("已配置的识别后端")
+                            heading: qsTr("可用识别后端")
+                            valueText: root.state ? String(root.usableProviderCount()) : "—"
+                            detail: root.state
+                                ? qsTr("共 %1 个配置 · %2 个需关注")
+                                    .arg(root.state.providers.length).arg(root.providerAttentionCount())
+                                : "—"
                         }
                         SummaryCard {
                             heading: qsTr("API 密钥")
@@ -613,10 +656,8 @@ ApplicationWindow {
                                     }
                                     Item { Layout.fillWidth: true }
                                     Label {
-                                        text: modelData.secret_state === "configured" ? qsTr("密钥已配置")
-                                            : modelData.secret_state === "missing" ? qsTr("密钥缺失") : qsTr("无需密钥")
-                                        color: modelData.secret_state === "configured" ? "#22c55e"
-                                            : modelData.secret_state === "missing" ? "#ef4444" : palette.text
+                                        text: root.readinessText(modelData.readiness)
+                                        color: root.readinessColor(modelData.readiness)
                                     }
                                 }
                                 Label {
