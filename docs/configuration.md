@@ -24,7 +24,7 @@ The general panel also exposes two safety/privacy controls:
 - `maximum_duration_seconds` automatically stops an accidentally abandoned
   recording (120 seconds by default, accepted range 5–3600 seconds);
 - recent transcript history is disabled by default. When explicitly enabled,
-  at most 20 items are retained in daemon memory for local grammar checks and
+  at most 20 items are retained in daemon memory for local text cleanup and
   are erased when the option is disabled or the daemon exits.
 
 Insertion backends are `fcitx` (strict focus lock), `auto` (Fcitx when

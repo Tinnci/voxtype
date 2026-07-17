@@ -1,4 +1,4 @@
-//! Small local grammar and typography checks for recent dictation text.
+//! Small local text-cleanup and typography checks for recent dictation text.
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GrammarIssue {

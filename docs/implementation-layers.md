@@ -133,7 +133,7 @@ doubles at protocol and process boundaries so failure behavior remains testable.
   short/long energy, calibrated SNR confidence, and live endpoint events. This
   is an algorithm improvement, not replacement of a mock.
 - Present `grammar.rs` as local typography/text cleanup. A feature called full
-  grammar checking needs a separate pluggable local or online checker plus a
+semantic grammar checking needs a separate pluggable local or online checker plus a
   review/apply/undo flow; heuristics must not be labelled as semantic grammar.
 - Replace the one-shot overlay snapshot with a persistent, event-driven view of
   daemon state, elapsed time, real input level, VAD state, and discrete provider

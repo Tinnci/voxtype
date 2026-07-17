@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=VoxType Grammar Check
-Name[zh_CN]=VoxType 最近输入语法检查
+Name=VoxType Local Text Cleanup
+Name[zh_CN]=VoxType 最近输入文本整理
 Comment=Check the most recently inserted VoxType transcript locally
 Comment[zh_CN]=在本地检查 VoxType 最近插入的文本
 Exec=voxtype grammar last

@@ -63,7 +63,7 @@ impl<'a> Client<'a> {
         self.proxy.call("TranscriptHistory", &())
     }
 
-    /// Checks grammar and typography of the most recent transcript.
+    /// Checks local typography and cleanup rules for the most recent transcript.
     ///
     /// # Errors
     ///

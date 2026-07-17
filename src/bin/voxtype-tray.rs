@@ -195,7 +195,7 @@ impl TrayMenu {
             }
             4 => {
                 #[allow(clippy::redundant_closure_for_method_calls)]
-                run_action("Grammar check", |client| client.check_last_grammar());
+                run_action("Local text cleanup", |client| client.check_last_grammar());
             }
             5 =>
             {

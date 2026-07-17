@@ -294,7 +294,7 @@ impl VoxTypeDaemon {
                 .collect::<Vec<_>>()
                 .join(" · ")
         };
-        overlay("grammar", "Grammar check", &body, 5_000);
+        overlay("grammar", "Local text cleanup", &body, 5_000);
         Ok(report.render())
     }
 

@@ -34,7 +34,7 @@ X-KDE-Shortcuts=Meta+Alt+Escape
 
 [Desktop Action Grammar]
 Name=Check Recent Grammar
-Name[zh_CN]=检查最近输入的语法
+Name[zh_CN]=整理最近输入的文本
 Exec=voxtype grammar last
 Icon=tools-check-spelling
 

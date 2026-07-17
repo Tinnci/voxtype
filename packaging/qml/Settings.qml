@@ -327,7 +327,7 @@ ApplicationWindow {
                             }
                             CheckBox {
                                 id: transcriptHistory
-                                text: qsTr("在内存中保留最近 20 条语音输入，用于语法检查")
+                                text: qsTr("在内存中保留最近 20 条语音输入，用于本地文本整理")
                                 checked: root.state ? root.state.general.transcript_history_enabled : false
                             }
                             Label {
