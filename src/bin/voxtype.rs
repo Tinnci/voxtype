@@ -155,10 +155,22 @@ fn run() -> Result<(), Box<dyn Error>> {
             "{}",
             client.start(arguments.next().as_deref().unwrap_or(""))?
         ),
-        "stop" => println!(
-            "{}",
-            client.stop(arguments.next().as_deref().unwrap_or(""))?
-        ),
+        "stop" => {
+            let first = arguments.next().unwrap_or_default();
+            if first == "--wait" {
+                let result = client.stop_wait(arguments.next().as_deref().unwrap_or(""))?;
+                println!(
+                    "session={} outcome={} error_code={} backend={} chars={}",
+                    result.session,
+                    result.outcome,
+                    result.error_code,
+                    result.backend,
+                    result.char_count
+                );
+            } else {
+                println!("{}", client.stop(&first)?);
+            }
+        }
         "toggle" => println!(
             "{}",
             client.toggle(arguments.next().as_deref().unwrap_or(""))?
@@ -177,7 +189,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype usage\n  voxtype grammar last|show|history|clear\n  voxtype fcitx-focus\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio|shortcut|insertion|provider|all]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
+        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype usage\n  voxtype grammar last|show|history|clear\n  voxtype fcitx-focus\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype stop --wait [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio|shortcut|insertion|provider|all]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
     );
 }
 

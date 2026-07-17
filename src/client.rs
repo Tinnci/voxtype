@@ -7,6 +7,15 @@ pub struct Client<'a> {
     proxy: Proxy<'a>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionResult {
+    pub session: String,
+    pub outcome: String,
+    pub error_code: String,
+    pub backend: String,
+    pub char_count: u64,
+}
+
 impl<'a> Client<'a> {
     /// Connects to the per-user `VoxType` daemon.
     ///
@@ -97,6 +106,50 @@ impl<'a> Client<'a> {
     /// Returns a D-Bus error if there is no matching active session.
     pub fn stop(&self, session: &str) -> zbus::Result<String> {
         self.proxy.call("Stop", &(session))
+    }
+
+    /// Stops recording and waits for the matching final session outcome.
+    ///
+    /// The result never contains transcript text. It is suitable for CLI and
+    /// automation callers that must distinguish acceptance from completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error when stopping fails, the signal body is malformed,
+    /// or the daemon disconnects before publishing the final outcome.
+    pub fn stop_wait(&self, session: &str) -> zbus::Result<SessionResult> {
+        let mut signals = self.proxy.receive_signal("SessionFinished")?;
+        let accepted = self.stop(session)?;
+        let requested = if session.is_empty() {
+            accepted
+                .split_whitespace()
+                .find_map(|part| part.strip_prefix("session="))
+                .unwrap_or_default()
+                .to_owned()
+        } else {
+            session.to_owned()
+        };
+        for message in &mut signals {
+            let (signal_session, outcome, error_code, backend, char_count): (
+                String,
+                String,
+                String,
+                String,
+                u64,
+            ) = message.body().deserialize()?;
+            if signal_session == requested {
+                return Ok(SessionResult {
+                    session: signal_session,
+                    outcome,
+                    error_code,
+                    backend,
+                    char_count,
+                });
+            }
+        }
+        Err(zbus::Error::Failure(
+            "daemon disconnected before SessionFinished".to_owned(),
+        ))
     }
 
     /// Toggles recording.

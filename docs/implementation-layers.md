@@ -73,12 +73,13 @@ system integrations. Required work is event correctness:
 `copy` is the portable no-injection fallback and the only automatic fallback
 when Fcitx is unavailable. Clipboard plus `ydotool` remains an explicit unsafe
 compatibility choice and is not a daemon service dependency.
-The daemon emits `StateChanged(state, session)` lifecycle events. The tray uses
-them for normal SNI icon/status and dbusmenu action updates, while a five-second
-status read remains only as disconnect/reconnect protection. The current signal
-adapter compares 100 ms snapshots, however, so short `finalizing` or `inserting`
-states can be lost. State-machine effects must feed an ordered bounded event
-queue before this integration can claim complete lifecycle delivery.
+The daemon emits ordered `StateChanged(state, session)` lifecycle events from a
+bounded queue populated immediately after each state-machine transition. Short
+`finalizing` and `inserting` states are no longer reconstructed from 100 ms
+snapshots. A transcript-free `SessionFinished` event reports the final outcome,
+stable error code, insertion backend, and character count for CLI/automation.
+The tray uses state events for normal SNI icon/status and dbusmenu updates,
+while a five-second status read remains only as disconnect/reconnect protection.
 
 ## Layer 4: user experience, configuration, and diagnostics
 

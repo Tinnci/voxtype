@@ -41,6 +41,7 @@ use zbus::fdo;
 #[derive(Debug)]
 pub struct VoxTypeDaemon {
     machine: SessionMachine,
+    events: VecDeque<DaemonEvent>,
     recording: Option<Recording>,
     inserter: ClipboardInserter,
     config: Config,
@@ -55,6 +56,23 @@ pub struct VoxTypeDaemon {
     last_live_audio: Option<vad::VadFrameAnalysis>,
     last_audio_overlay_at: Option<Instant>,
     quit: bool,
+}
+
+const MAX_PENDING_EVENTS: usize = 256;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DaemonEvent {
+    StateChanged {
+        state: String,
+        session: String,
+    },
+    SessionFinished {
+        session: String,
+        outcome: String,
+        error_code: String,
+        backend: String,
+        char_count: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -231,6 +249,16 @@ impl VoxTypeDaemon {
         session: &str,
     ) -> zbus::Result<()>;
 
+    #[zbus(signal)]
+    pub async fn session_finished(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        session: &str,
+        outcome: &str,
+        error_code: &str,
+        backend: &str,
+        char_count: u64,
+    ) -> zbus::Result<()>;
+
     /// Returns a compact snapshot of configured provider health.
     fn provider_status(&self) -> String {
         let now = Instant::now();
@@ -326,8 +354,7 @@ impl VoxTypeDaemon {
             profile: Some(profile_name.clone()),
         };
         let effect = self
-            .machine
-            .apply(Command::Start(request))
+            .apply_command(Command::Start(request))
             .map_err(map_error)?;
         let CommandEffect::BeginCapture { session, .. } = effect else {
             return Err(fdo::Error::Failed("invalid start effect".to_owned()));
@@ -342,7 +369,7 @@ impl VoxTypeDaemon {
         match armed {
             Ok(armed) => self.armed_insertion = Some(armed),
             Err(error) => {
-                let _effect = self.machine.apply(Command::Fail {
+                let _effect = self.apply_command(Command::Fail {
                     session,
                     error: error.clone(),
                 });
@@ -363,11 +390,10 @@ impl VoxTypeDaemon {
                 self.last_audio_overlay_at = None;
                 self.recording_started_at = Some(Instant::now());
                 self.active_profile = Some(profile_name);
-                self.machine
-                    .apply(Command::CaptureReady {
-                        session: session.clone(),
-                    })
-                    .map_err(map_error)?;
+                self.apply_command(Command::CaptureReady {
+                    session: session.clone(),
+                })
+                .map_err(map_error)?;
                 notify("VoxType", "Listening…");
                 overlay(
                     "listening",
@@ -387,7 +413,7 @@ impl VoxTypeDaemon {
                     "audio.start_failed",
                     error.to_string(),
                 );
-                let _effect = self.machine.apply(Command::Fail {
+                let _effect = self.apply_command(Command::Fail {
                     session,
                     error: domain_error,
                 });
@@ -399,11 +425,10 @@ impl VoxTypeDaemon {
     fn stop(&mut self, session: &str) -> fdo::Result<String> {
         let active = self.active_session_id(session)?;
         self.poll_audio_telemetry();
-        self.machine
-            .apply(Command::Stop {
-                session: active.clone(),
-            })
-            .map_err(map_error)?;
+        self.apply_command(Command::Stop {
+            session: active.clone(),
+        })
+        .map_err(map_error)?;
         let recording = self
             .recording
             .take()
@@ -412,9 +437,23 @@ impl VoxTypeDaemon {
         self.live_vad = None;
         self.last_live_audio = None;
         self.last_audio_overlay_at = None;
-        let result = recording
-            .stop()
-            .map_err(|error| fdo::Error::Failed(format!("failed to stop capture: {error}")))?;
+        let result = match recording.stop() {
+            Ok(result) => result,
+            Err(error) => {
+                let domain_error = VoxError::new(
+                    ErrorCategory::Unavailable,
+                    "audio.stop_failed",
+                    error.to_string(),
+                );
+                let _effect = self.apply_command(Command::Fail {
+                    session: active,
+                    error: domain_error,
+                });
+                return Err(fdo::Error::Failed(format!(
+                    "failed to stop capture: {error}"
+                )));
+            }
+        };
         overlay(
             "processing",
             "Processing speech",
@@ -422,6 +461,13 @@ impl VoxTypeDaemon {
             0,
         );
         let response = self.begin_recognition(&active, &result);
+        if let Err(error) = &response {
+            self.fail_nonterminal_session(
+                &active,
+                "recognition.pipeline_failed",
+                error.to_string(),
+            );
+        }
         if response.is_err() && self.armed_insertion == Some(ArmedInsertion::Fcitx) {
             FcitxBridge.cancel(&active);
         }
@@ -445,11 +491,10 @@ impl VoxTypeDaemon {
 
     fn cancel(&mut self, session: &str) -> fdo::Result<()> {
         let active = self.active_session_id(session)?;
-        self.machine
-            .apply(Command::Cancel {
-                session: active.clone(),
-            })
-            .map_err(map_error)?;
+        self.apply_command(Command::Cancel {
+            session: active.clone(),
+        })
+        .map_err(map_error)?;
         if let Some(recording) = self.recording.take() {
             recording.cancel();
         }
@@ -477,7 +522,7 @@ impl VoxTypeDaemon {
     }
 
     fn reset(&mut self) -> fdo::Result<()> {
-        self.machine.apply(Command::Reset).map_err(map_error)?;
+        self.apply_command(Command::Reset).map_err(map_error)?;
         Ok(())
     }
 
@@ -549,6 +594,10 @@ impl VoxTypeDaemon {
         let inserter = ClipboardInserter::default().with_restore(config.desktop.restore_clipboard);
         Ok(Self {
             machine: SessionMachine::default(),
+            events: VecDeque::from([DaemonEvent::StateChanged {
+                state: "idle".to_owned(),
+                session: String::new(),
+            }]),
             recording: None,
             inserter,
             config,
@@ -580,6 +629,63 @@ impl VoxTypeDaemon {
                 .session()
                 .map_or_else(String::new, ToString::to_string),
         )
+    }
+
+    #[must_use]
+    pub fn drain_events(&mut self) -> Vec<DaemonEvent> {
+        self.events.drain(..).collect()
+    }
+
+    fn apply_command(&mut self, command: Command) -> Result<CommandEffect, VoxError> {
+        if self.events.len() > MAX_PENDING_EVENTS.saturating_sub(2) {
+            return Err(VoxError::new(
+                ErrorCategory::Unavailable,
+                "daemon.event_backpressure",
+                "desktop event queue is temporarily full",
+            )
+            .with_retryable(true));
+        }
+        let terminal = match &command {
+            Command::Cancel { session } => Some((session.clone(), "cancelled", "")),
+            Command::NoSpeech { session } => Some((session.clone(), "no-speech", "")),
+            Command::Fail { session, error } => Some((session.clone(), "failed", error.code())),
+            _ => None,
+        };
+        let effect = self.machine.apply(command)?;
+        self.queue_current_state();
+        if let Some((session, outcome, error_code)) = terminal {
+            self.queue_session_finished(&session, outcome, error_code, "", 0);
+        }
+        Ok(effect)
+    }
+
+    fn queue_current_state(&mut self) {
+        self.events.push_back(DaemonEvent::StateChanged {
+            state: self.machine.state().name().to_owned(),
+            session: self
+                .machine
+                .state()
+                .session()
+                .map_or_else(String::new, ToString::to_string),
+        });
+    }
+
+    fn queue_session_finished(
+        &mut self,
+        session: &SessionId,
+        outcome: &str,
+        error_code: &str,
+        backend: &str,
+        char_count: u64,
+    ) {
+        debug_assert!(self.events.len() < MAX_PENDING_EVENTS);
+        self.events.push_back(DaemonEvent::SessionFinished {
+            session: session.to_string(),
+            outcome: outcome.to_owned(),
+            error_code: error_code.to_owned(),
+            backend: backend.to_owned(),
+            char_count,
+        });
     }
 
     /// Stops a recording that exceeded the configured safety duration.
@@ -735,6 +841,25 @@ impl VoxTypeDaemon {
         }
     }
 
+    fn fail_nonterminal_session(
+        &mut self,
+        session: &SessionId,
+        code: &'static str,
+        message: String,
+    ) {
+        let is_active = self.machine.state().session() == Some(session)
+            && matches!(
+                self.machine.state().name(),
+                "preparing" | "listening" | "finalizing" | "inserting"
+            );
+        if is_active {
+            let _effect = self.apply_command(Command::Fail {
+                session: session.clone(),
+                error: VoxError::new(ErrorCategory::Internal, code, message),
+            });
+        }
+    }
+
     fn active_session_id(&self, requested: &str) -> fdo::Result<SessionId> {
         let active = self
             .machine
@@ -837,7 +962,7 @@ impl VoxTypeDaemon {
 
     fn fail_recognition(&mut self, session: &SessionId, error: VoxError) -> fdo::Result<String> {
         let message = error.to_string();
-        let _effect = self.machine.apply(Command::Fail {
+        let _effect = self.apply_command(Command::Fail {
             session: session.clone(),
             error,
         });
@@ -865,8 +990,7 @@ impl VoxTypeDaemon {
             .record_success(api_usage);
         self.provider_succeeded(provider_id);
         let effect = self
-            .machine
-            .apply(Command::TranscriptReady {
+            .apply_command(Command::TranscriptReady {
                 session: session.clone(),
                 text: text.clone(),
             })
@@ -876,12 +1000,28 @@ impl VoxTypeDaemon {
                 "state machine did not request insertion".to_owned(),
             ));
         };
-        let insertion = self.insert_text(session, &text).map_err(map_error)?;
-        self.machine
-            .apply(Command::InsertionComplete {
-                session: session.clone(),
-            })
-            .map_err(map_error)?;
+        let insertion = match self.insert_text(session, &text) {
+            Ok(insertion) => insertion,
+            Err(error) => {
+                let mapped = map_error(error.clone());
+                let _effect = self.apply_command(Command::Fail {
+                    session: session.clone(),
+                    error,
+                });
+                return Err(mapped);
+            }
+        };
+        self.apply_command(Command::InsertionComplete {
+            session: session.clone(),
+        })
+        .map_err(map_error)?;
+        self.queue_session_finished(
+            session,
+            "completed",
+            "",
+            insertion.backend,
+            u64::try_from(text.chars().count()).unwrap_or(u64::MAX),
+        );
         if self.config.desktop.transcript_history_enabled {
             if self.transcript_history.len() == 20 {
                 self.transcript_history.pop_front();
@@ -957,11 +1097,10 @@ impl VoxTypeDaemon {
         if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
             FcitxBridge.cancel(session);
         }
-        self.machine
-            .apply(Command::NoSpeech {
-                session: session.clone(),
-            })
-            .map_err(map_error)?;
+        self.apply_command(Command::NoSpeech {
+            session: session.clone(),
+        })
+        .map_err(map_error)?;
         let (reason, guidance) = no_speech_guidance(
             &result,
             self.config.audio.vad_rms_threshold,
@@ -991,11 +1130,10 @@ impl VoxTypeDaemon {
         if self.armed_insertion == Some(ArmedInsertion::Fcitx) {
             FcitxBridge.cancel(session);
         }
-        self.machine
-            .apply(Command::NoSpeech {
-                session: session.clone(),
-            })
-            .map_err(map_error)?;
+        self.apply_command(Command::NoSpeech {
+            session: session.clone(),
+        })
+        .map_err(map_error)?;
         notify("VoxType", "Recording was too short");
         overlay(
             "no-speech",
@@ -1686,6 +1824,140 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event_test_daemon() -> VoxTypeDaemon {
+        let config: Config = toml::from_str(
+            r#"schema_version = 1
+default_profile = "test"
+[desktop]
+[audio]
+[profiles.test]
+primary = "mock"
+[providers.mock]
+kind = "mock"
+text = "test"
+"#,
+        )
+        .expect("test config");
+        VoxTypeDaemon {
+            machine: SessionMachine::default(),
+            events: VecDeque::from([DaemonEvent::StateChanged {
+                state: "idle".to_owned(),
+                session: String::new(),
+            }]),
+            recording: None,
+            inserter: ClipboardInserter::default(),
+            config,
+            active_profile: None,
+            armed_insertion: None,
+            provider_health: std::collections::BTreeMap::new(),
+            provider_usage: std::collections::BTreeMap::new(),
+            transcript_history: VecDeque::new(),
+            recording_started_at: None,
+            recognition_job: None,
+            live_vad: None,
+            last_live_audio: None,
+            last_audio_overlay_at: None,
+            quit: false,
+        }
+    }
+
+    #[test]
+    fn emits_every_happy_path_state_in_order() {
+        let mut daemon = event_test_daemon();
+        let effect = daemon
+            .apply_command(Command::Start(StartRequest {
+                mode: TriggerMode::Toggle,
+                profile: None,
+            }))
+            .expect("start");
+        let CommandEffect::BeginCapture { session, .. } = effect else {
+            panic!("expected capture effect");
+        };
+        daemon
+            .apply_command(Command::CaptureReady {
+                session: session.clone(),
+            })
+            .expect("capture ready");
+        daemon
+            .apply_command(Command::Stop {
+                session: session.clone(),
+            })
+            .expect("stop");
+        daemon
+            .apply_command(Command::TranscriptReady {
+                session: session.clone(),
+                text: "hello".to_owned(),
+            })
+            .expect("transcript");
+        daemon
+            .apply_command(Command::InsertionComplete {
+                session: session.clone(),
+            })
+            .expect("insertion");
+        daemon.queue_session_finished(&session, "completed", "", "fcitx", 5);
+
+        let events = daemon.drain_events();
+        let states = events
+            .iter()
+            .filter_map(|event| match event {
+                DaemonEvent::StateChanged { state, .. } => Some(state.as_str()),
+                DaemonEvent::SessionFinished { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            [
+                "idle",
+                "preparing",
+                "listening",
+                "finalizing",
+                "inserting",
+                "completed"
+            ]
+        );
+        assert!(matches!(
+            events.last(),
+            Some(DaemonEvent::SessionFinished {
+                outcome,
+                backend,
+                char_count: 5,
+                ..
+            }) if outcome == "completed" && backend == "fcitx"
+        ));
+    }
+
+    #[test]
+    fn cancellation_emits_terminal_metadata_after_state_change() {
+        let mut daemon = event_test_daemon();
+        let effect = daemon
+            .apply_command(Command::Start(StartRequest {
+                mode: TriggerMode::Toggle,
+                profile: None,
+            }))
+            .expect("start");
+        let CommandEffect::BeginCapture { session, .. } = effect else {
+            panic!("expected capture effect");
+        };
+        daemon
+            .apply_command(Command::Cancel {
+                session: session.clone(),
+            })
+            .expect("cancel");
+        let events = daemon.drain_events();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                DaemonEvent::StateChanged { state: idle, .. },
+                DaemonEvent::StateChanged { state: preparing, .. },
+                DaemonEvent::StateChanged { state: cancelled, .. },
+                DaemonEvent::SessionFinished { outcome, .. }
+            ] if idle == "idle"
+                && preparing == "preparing"
+                && cancelled == "cancelled"
+                && outcome == "cancelled"
+        ));
+    }
 
     #[test]
     fn provider_health_blocks_after_three_retryable_failures() {

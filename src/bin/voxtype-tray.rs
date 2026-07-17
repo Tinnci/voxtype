@@ -32,6 +32,9 @@ impl TrayPresentation {
             "listening" => Self::attention(status, "microphone-sensitivity-high"),
             "finalizing" => Self::active(status, "content-loading"),
             "inserting" => Self::active(status, "insert-text"),
+            "completed" => Self::active(status, "emblem-default"),
+            "cancelled" => Self::active(status, "process-stop"),
+            "failed" => Self::attention(status, "dialog-error"),
             "unavailable" => Self::attention(status, "dialog-error"),
             _ => Self::active(status, "audio-input-microphone"),
         }
@@ -477,12 +480,18 @@ mod tests {
         let listening = TrayPresentation::from_daemon_status("listening");
         let processing = TrayPresentation::from_daemon_status("finalizing");
         let inserting = TrayPresentation::from_daemon_status("inserting");
+        let completed = TrayPresentation::from_daemon_status("completed");
+        let cancelled = TrayPresentation::from_daemon_status("cancelled");
+        let failed = TrayPresentation::from_daemon_status("failed");
 
         assert_eq!(idle.status, "Active");
         assert_eq!(listening.status, "NeedsAttention");
         assert_ne!(idle.icon_name, listening.icon_name);
         assert_ne!(listening.icon_name, processing.icon_name);
         assert_ne!(processing.icon_name, inserting.icon_name);
+        assert_eq!(completed.icon_name, "emblem-default");
+        assert_eq!(cancelled.icon_name, "process-stop");
+        assert_eq!(failed.status, "NeedsAttention");
     }
 
     #[test]

@@ -1,7 +1,10 @@
 use std::error::Error;
 use std::thread;
 use std::time::Duration;
-use voxtype::{DBUS_NAME, DBUS_PATH, daemon::VoxTypeDaemon};
+use voxtype::{
+    DBUS_NAME, DBUS_PATH,
+    daemon::{DaemonEvent, VoxTypeDaemon},
+};
 use zbus::blocking::connection::Builder;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -11,7 +14,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build()?;
 
     eprintln!("voxtyped ready on {DBUS_NAME}");
-    let mut last_snapshot = None;
     loop {
         let interface = connection
             .object_server()
@@ -27,17 +29,31 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Err(error) = daemon.poll_recognition() {
             eprintln!("voxtyped recognition failed: {error}");
         }
-        let snapshot = daemon.state_snapshot();
+        let events = daemon.drain_events();
         drop(daemon);
-        if last_snapshot.as_ref() != Some(&snapshot) {
-            if let Err(error) = zbus::block_on(VoxTypeDaemon::state_changed(
-                interface.signal_emitter(),
-                &snapshot.0,
-                &snapshot.1,
-            )) {
-                eprintln!("voxtyped state signal failed: {error}");
+        for event in events {
+            let result = match event {
+                DaemonEvent::StateChanged { state, session } => zbus::block_on(
+                    VoxTypeDaemon::state_changed(interface.signal_emitter(), &state, &session),
+                ),
+                DaemonEvent::SessionFinished {
+                    session,
+                    outcome,
+                    error_code,
+                    backend,
+                    char_count,
+                } => zbus::block_on(VoxTypeDaemon::session_finished(
+                    interface.signal_emitter(),
+                    &session,
+                    &outcome,
+                    &error_code,
+                    &backend,
+                    char_count,
+                )),
+            };
+            if let Err(error) = result {
+                eprintln!("voxtyped lifecycle signal failed: {error}");
             }
-            last_snapshot = Some(snapshot);
         }
         drop(interface);
         thread::sleep(Duration::from_millis(100));

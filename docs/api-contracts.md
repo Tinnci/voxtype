@@ -300,10 +300,15 @@ InsertTest(s text) -> (s result)
 
 ```text
 StateChanged(s state, s session_id)
+SessionFinished(s session_id, s outcome, s error_code, s backend, t char_count)
 ```
 
-`StateChanged` contains lifecycle metadata only and is emitted after every
-public state transition. It never contains transcript text or provider secrets.
+`StateChanged` contains lifecycle metadata only and is emitted in the exact
+order accepted by the daemon state machine. It never contains transcript text
+or provider secrets. `SessionFinished` is emitted once after the terminal state
+and contains only outcome metadata: `completed`, `no-speech`, `cancelled`, or
+`failed`; `error_code`, insertion backend, and character count are empty/zero
+when not applicable.
 
 An empty profile selects `default_profile`; an empty session ID selects the
 currently active session. `UsageStatus` is JSON because the counters and soft
@@ -313,9 +318,11 @@ history.
 
 `Stop` acknowledges the transition to `finalizing` after capture/VAD work has
 been accepted. Provider I/O runs in a cancellable background job; completion or
-failure is reflected by `Status`, while `Cancel` and status queries remain
-responsive. A worker result is applied only when its opaque session ID still
-matches the active finalizing session.
+failure is reflected by the ordered signals, while `Cancel` and status queries
+remain responsive. CLI callers may use `voxtype stop --wait [SESSION]` to wait
+for the matching `SessionFinished` without reading transcript history. A worker
+result is applied only when its opaque session ID still matches the active
+finalizing session.
 
 Transcript and partial-result signals are intentionally absent until observer
 privacy and same-user access semantics are defined.
