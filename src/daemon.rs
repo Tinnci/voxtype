@@ -50,6 +50,7 @@ pub struct VoxTypeDaemon {
     provider_health: std::collections::BTreeMap<String, ProviderHealthState>,
     provider_usage: std::collections::BTreeMap<String, ProviderUsageState>,
     transcript_history: VecDeque<String>,
+    session_results: VecDeque<TerminalSessionResult>,
     recording_started_at: Option<Instant>,
     recognition_job: Option<RecognitionJob>,
     live_vad: Option<vad::StreamingVad>,
@@ -59,6 +60,7 @@ pub struct VoxTypeDaemon {
 }
 
 const MAX_PENDING_EVENTS: usize = 256;
+const MAX_SESSION_RESULTS: usize = 32;
 const PROVIDER_VERIFICATION_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,6 +76,15 @@ pub enum DaemonEvent {
         backend: String,
         char_count: u64,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TerminalSessionResult {
+    session: String,
+    outcome: String,
+    error_code: String,
+    backend: String,
+    char_count: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -309,6 +320,32 @@ impl VoxTypeDaemon {
             "providers": providers,
         })
         .to_string()
+    }
+
+    /// Returns a retained transcript-free terminal result for one session.
+    fn session_result(&self, session: &str) -> fdo::Result<(bool, String, String, String, u64)> {
+        if session.is_empty() || session.len() > 128 || session.chars().any(char::is_control) {
+            return Err(fdo::Error::InvalidArgs(
+                "session ID must be non-empty and bounded".to_owned(),
+            ));
+        }
+        Ok(self
+            .session_results
+            .iter()
+            .rev()
+            .find(|result| result.session == session)
+            .map_or_else(
+                || (false, String::new(), String::new(), String::new(), 0),
+                |result| {
+                    (
+                        true,
+                        result.outcome.clone(),
+                        result.error_code.clone(),
+                        result.backend.clone(),
+                        result.char_count,
+                    )
+                },
+            ))
     }
 
     fn last_transcript(&self) -> String {
@@ -644,6 +681,7 @@ impl VoxTypeDaemon {
             provider_health: std::collections::BTreeMap::new(),
             provider_usage: std::collections::BTreeMap::new(),
             transcript_history: VecDeque::with_capacity(20),
+            session_results: VecDeque::with_capacity(MAX_SESSION_RESULTS),
             recording_started_at: None,
             recognition_job: None,
             live_vad: None,
@@ -717,6 +755,23 @@ impl VoxTypeDaemon {
         char_count: u64,
     ) {
         debug_assert!(self.events.len() < MAX_PENDING_EVENTS);
+        if let Some(position) = self
+            .session_results
+            .iter()
+            .position(|result| result.session == session.as_str())
+        {
+            self.session_results.remove(position);
+        }
+        if self.session_results.len() == MAX_SESSION_RESULTS {
+            self.session_results.pop_front();
+        }
+        self.session_results.push_back(TerminalSessionResult {
+            session: session.to_string(),
+            outcome: outcome.to_owned(),
+            error_code: error_code.to_owned(),
+            backend: backend.to_owned(),
+            char_count,
+        });
         self.events.push_back(DaemonEvent::SessionFinished {
             session: session.to_string(),
             outcome: outcome.to_owned(),
@@ -1963,6 +2018,7 @@ text = "test"
             provider_health: std::collections::BTreeMap::new(),
             provider_usage: std::collections::BTreeMap::new(),
             transcript_history: VecDeque::new(),
+            session_results: VecDeque::new(),
             recording_started_at: None,
             recognition_job: None,
             live_vad: None,
@@ -2067,6 +2123,60 @@ text = "test"
                 && cancelled == "cancelled"
                 && outcome == "cancelled"
         ));
+    }
+
+    #[test]
+    fn terminal_result_survives_signal_queue_drain() {
+        let mut daemon = event_test_daemon();
+        let session = SessionId::from_counter(42);
+        daemon.queue_session_finished(&session, "completed", "", "fcitx", 12);
+        let _events = daemon.drain_events();
+
+        let result = daemon
+            .session_result(session.as_str())
+            .expect("session result query");
+        assert_eq!(
+            result,
+            (
+                true,
+                "completed".to_owned(),
+                String::new(),
+                "fcitx".to_owned(),
+                12
+            )
+        );
+    }
+
+    #[test]
+    fn terminal_result_cache_is_bounded_and_updates_idempotently() {
+        let mut daemon = event_test_daemon();
+        for counter in 0..=MAX_SESSION_RESULTS {
+            let session = SessionId::from_counter(u64::try_from(counter).expect("counter"));
+            daemon.queue_session_finished(&session, "cancelled", "", "", 0);
+        }
+        assert_eq!(daemon.session_results.len(), MAX_SESSION_RESULTS);
+        assert!(
+            !daemon
+                .session_result(SessionId::from_counter(0).as_str())
+                .expect("evicted result")
+                .0
+        );
+
+        let latest = SessionId::from_counter(u64::try_from(MAX_SESSION_RESULTS).expect("counter"));
+        daemon.queue_session_finished(&latest, "completed", "", "copy-only", 3);
+        assert_eq!(daemon.session_results.len(), MAX_SESSION_RESULTS);
+        assert_eq!(
+            daemon
+                .session_result(latest.as_str())
+                .expect("updated result"),
+            (
+                true,
+                "completed".to_owned(),
+                String::new(),
+                "copy-only".to_owned(),
+                3
+            )
+        );
     }
 
     #[test]

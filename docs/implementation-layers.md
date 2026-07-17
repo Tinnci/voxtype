@@ -157,7 +157,9 @@ doubles at protocol and process boundaries so failure behavior remains testable.
 - D-Bus must expose an ordered final session outcome. `Stop` returning
   `result=processing` is only acceptance, not recognition success; clients need
   a single completion/failure/cancel event and stable error code without
-  requiring transcript history.
+  requiring transcript history. The daemon now retains the latest 32
+  transcript-free terminal results, and `stop --wait` uses the query contract
+  with a finite timeout rather than depending on one ephemeral signal.
 
 ### P1: replace approximations with truthful production algorithms
 

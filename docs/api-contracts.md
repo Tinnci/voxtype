@@ -288,6 +288,7 @@ Cancel(s session_id) -> ()
 Reset() -> ()
 ProviderStatus() -> (s json)
 UsageStatus() -> (s json)
+SessionResult(s session_id) -> (b found, s outcome, s error_code, s backend, t char_count)
 LastTranscript() -> (s text)
 TranscriptHistory() -> (as texts)
 CheckLastGrammar() -> (s report)
@@ -365,6 +366,11 @@ The Fcitx context form adds a `source` object containing only frontend,
 application identity, generation and truncation metadata. Password/sensitive
 contexts are still rejected inside the addon before text reaches Rust.
 
+`SessionResult` reads a bounded cache of the latest 32 terminal sessions. The
+cache contains the same metadata as `SessionFinished` and never contains
+transcript text. Repeating a query is side-effect free. A missing entry means
+the session is still active, unknown, or older than the cache window.
+
 `StateChanged` contains lifecycle metadata only and is emitted in the exact
 order accepted by the daemon state machine. It never contains transcript text
 or provider secrets. `SessionFinished` is emitted once after the terminal state
@@ -381,10 +387,11 @@ history.
 `Stop` acknowledges the transition to `finalizing` after capture/VAD work has
 been accepted. Provider I/O runs in a cancellable background job; completion or
 failure is reflected by the ordered signals, while `Cancel` and status queries
-remain responsive. CLI callers may use `voxtype stop --wait [SESSION]` to wait
-for the matching `SessionFinished` without reading transcript history. A worker
-result is applied only when its opaque session ID still matches the active
-finalizing session.
+remain responsive. CLI callers may use `voxtype stop --wait [SESSION]`; it polls
+the retained terminal result with a five-minute bound, so a missed or failed
+signal cannot hang the caller. `voxtype result SESSION` performs a single
+query. A worker result is applied only when its opaque session ID still matches
+the active finalizing session.
 
 Transcript and partial-result signals are intentionally absent until observer
 privacy and same-user access semantics are defined.
@@ -421,6 +428,7 @@ voxtype cancel [SESSION]
 voxtype status
 voxtype providers
 voxtype usage
+voxtype result SESSION
 voxtype grammar context|last|show|history|clear
 voxtype fcitx-context
 voxtype doctor [audio|shortcut|provider|insertion|all]

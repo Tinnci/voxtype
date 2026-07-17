@@ -1,7 +1,12 @@
 //! Blocking D-Bus client used by the thin command-line interface.
 
 use crate::{DBUS_INTERFACE, DBUS_NAME, DBUS_PATH};
+use std::thread;
+use std::time::{Duration, Instant};
 use zbus::blocking::{Connection, Proxy};
+
+const SESSION_RESULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const SESSION_RESULT_WAIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub struct Client<'a> {
     proxy: Proxy<'a>,
@@ -118,6 +123,26 @@ impl<'a> Client<'a> {
         self.proxy.call("Stop", &(session))
     }
 
+    /// Queries a retained transcript-free terminal result.
+    ///
+    /// `None` means the session is still running, unknown, or older than the
+    /// daemon's bounded result cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error when the daemon cannot answer the query.
+    pub fn session_result(&self, session: &str) -> zbus::Result<Option<SessionResult>> {
+        let (found, outcome, error_code, backend, char_count): (bool, String, String, String, u64) =
+            self.proxy.call("SessionResult", &(session))?;
+        Ok(found.then(|| SessionResult {
+            session: session.to_owned(),
+            outcome,
+            error_code,
+            backend,
+            char_count,
+        }))
+    }
+
     /// Stops recording and waits for the matching final session outcome.
     ///
     /// The result never contains transcript text. It is suitable for CLI and
@@ -125,10 +150,9 @@ impl<'a> Client<'a> {
     ///
     /// # Errors
     ///
-    /// Returns a D-Bus error when stopping fails, the signal body is malformed,
-    /// or the daemon disconnects before publishing the final outcome.
+    /// Returns a D-Bus error when stopping fails, the daemon disconnects, or no
+    /// terminal result becomes queryable within five minutes.
     pub fn stop_wait(&self, session: &str) -> zbus::Result<SessionResult> {
-        let mut signals = self.proxy.receive_signal("SessionFinished")?;
         let accepted = self.stop(session)?;
         let requested = if session.is_empty() {
             accepted
@@ -139,27 +163,23 @@ impl<'a> Client<'a> {
         } else {
             session.to_owned()
         };
-        for message in &mut signals {
-            let (signal_session, outcome, error_code, backend, char_count): (
-                String,
-                String,
-                String,
-                String,
-                u64,
-            ) = message.body().deserialize()?;
-            if signal_session == requested {
-                return Ok(SessionResult {
-                    session: signal_session,
-                    outcome,
-                    error_code,
-                    backend,
-                    char_count,
-                });
-            }
+        if requested.is_empty() {
+            return Err(zbus::Error::Failure(
+                "daemon did not return a session ID while accepting Stop".to_owned(),
+            ));
         }
-        Err(zbus::Error::Failure(
-            "daemon disconnected before SessionFinished".to_owned(),
-        ))
+        let deadline = Instant::now() + SESSION_RESULT_WAIT_TIMEOUT;
+        loop {
+            if let Some(result) = self.session_result(&requested)? {
+                return Ok(result);
+            }
+            if Instant::now() >= deadline {
+                return Err(zbus::Error::Failure(format!(
+                    "timed out waiting for terminal result for session {requested}"
+                )));
+            }
+            thread::sleep(SESSION_RESULT_POLL_INTERVAL);
+        }
     }
 
     /// Toggles recording.

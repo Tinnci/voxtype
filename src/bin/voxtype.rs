@@ -132,6 +132,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         "status" => println!("{}", client.status()?),
         "providers" => println!("{}", client.provider_status()?),
         "usage" => println!("{}", client.usage_status()?),
+        "result" => print_session_result(
+            &client,
+            &arguments.next().ok_or("usage: voxtype result SESSION")?,
+        )?,
         "grammar" => grammar_command(&client, arguments.next().as_deref().unwrap_or("last"))?,
         "fcitx-focus" => {
             if client.status()? != "idle" {
@@ -202,9 +206,20 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn print_session_result(client: &Client<'_>, session: &str) -> Result<(), Box<dyn Error>> {
+    let result = client
+        .session_result(session)?
+        .ok_or("no retained terminal result for that session")?;
+    println!(
+        "session={} outcome={} error_code={} backend={} chars={}",
+        result.session, result.outcome, result.error_code, result.backend, result.char_count
+    );
+    Ok(())
+}
+
 fn print_help() {
     println!(
-        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype usage\n  voxtype grammar context|last|show|history|clear\n  voxtype fcitx-focus\n  voxtype fcitx-context\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype stop --wait [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio|shortcut|insertion|provider|all]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
+        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype usage\n  voxtype result SESSION\n  voxtype grammar context|last|show|history|clear\n  voxtype fcitx-focus\n  voxtype fcitx-context\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype stop --wait [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio|shortcut|insertion|provider|all]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
     );
 }
 
