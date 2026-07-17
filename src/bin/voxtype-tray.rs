@@ -34,8 +34,7 @@ impl TrayPresentation {
             "inserting" => Self::active(status, "insert-text"),
             "completed" => Self::active(status, "emblem-default"),
             "cancelled" => Self::active(status, "process-stop"),
-            "failed" => Self::attention(status, "dialog-error"),
-            "unavailable" => Self::attention(status, "dialog-error"),
+            "failed" | "unavailable" => Self::attention(status, "dialog-error"),
             _ => Self::active(status, "audio-input-microphone"),
         }
     }

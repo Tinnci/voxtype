@@ -7,7 +7,8 @@ stable native addon API is C++.
 ## What the addon does
 
 - creates `$XDG_RUNTIME_DIR/voxtype/fcitx.sock` with mode `0600`;
-- accepts `ARM`, `COMMIT`, `CANCEL`, and `PING` datagrams from the same user;
+- accepts `ARM`, legacy `COMMIT`, idempotent `COMMIT2`, `CANCEL`, and `PING`
+  datagrams from the same user;
 - records the currently focused Fcitx `InputContext` at `ARM`;
 - rejects Password/Sensitive contexts;
 - rechecks focus, context identity, and secure flags before committing;
@@ -15,6 +16,14 @@ stable native addon API is C++.
   final focus/security check. This proves delivery to the Fcitx input-context
   API, not that a target widget rendered or retained the text;
 - defers `commitString` to the next Fcitx event-loop turn;
+- requires `COMMIT2` to carry a process-unique request ID, caches the most
+  recent terminal result, and redirects a duplicate in-flight request to the
+  newest reply socket. A timeout retry therefore cannot dispatch the same text
+  twice, and a lost ACK can be recovered from the cached result. The completed
+  cache keeps only request/session metadata plus a text length/fingerprint, not
+  the committed text itself;
+- rejects outbound requests above 60 KiB and uses `MSG_TRUNC` to reject
+  oversized inbound datagrams instead of parsing truncated text;
 - never performs audio capture, network access, secret lookup, or clipboard work.
 - exposes one standard Fcitx external-config action that launches
   `voxtype-settings`; all configuration logic remains in the Rust application.
@@ -88,9 +97,11 @@ application.
 
 The addon is compiled with `-Wall -Wextra -Wpedantic -Werror`, loaded by the
 local Fcitx5 5.1.21 process, and its socket/permission/protocol checks pass.
-The repository also has Rust unit tests for bridge response handling.
+The repository also has Rust unit tests for request-ID ACK matching and bounded
+message encoding, while the C++ addon is built with warnings as errors.
 
 An automated Wayland GUI test cannot safely force keyboard focus without user
 interaction, so native commit into a real application must be manually checked
-in a focused text field. The clipboard fallback is separately covered by the
-existing `kdialog` integration test.
+in a focused text field. Clipboard delivery also remains a manual desktop check;
+an exit status from `ydotool` is not accepted as proof that a widget received
+the text.

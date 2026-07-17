@@ -91,8 +91,25 @@ impl FcitxBridge {
     /// Returns an error for focus changes, secure contexts, session mismatch, or
     /// addon transport failure. Callers must not silently fall back after this.
     pub fn commit(self, session: &SessionId, text: &str) -> Result<(), VoxError> {
-        let response = request(&[b"COMMIT", session.as_str().as_bytes(), text.as_bytes()])?;
-        expect_dispatched(&response)
+        let request_id = format!(
+            "{}-{}",
+            std::process::id(),
+            CLIENT_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let response = request_with_retry(&[
+            b"COMMIT2",
+            request_id.as_bytes(),
+            session.as_str().as_bytes(),
+            text.as_bytes(),
+        ])?;
+        match expect_dispatched_for(&response, &request_id) {
+            Ok(()) => Ok(()),
+            Err(error) if error.message().contains("unknown-command") => {
+                let response = request(&[b"COMMIT", session.as_str().as_bytes(), text.as_bytes()])?;
+                expect_dispatched(&response)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Clears any armed input context for the session.
@@ -133,8 +150,42 @@ fn parse_identity_field(field: Option<&[u8]>) -> Result<String, VoxError> {
 }
 
 fn request(parts: &[&[u8]]) -> Result<Vec<u8>, VoxError> {
+    request_once(parts)
+}
+
+fn request_with_retry(parts: &[&[u8]]) -> Result<Vec<u8>, VoxError> {
     let runtime = runtime_dir()?;
-    fs::create_dir_all(&runtime).map_err(transport_io)?;
+    request_with_retry_at(parts, &runtime)
+}
+
+fn request_with_retry_at(parts: &[&[u8]], runtime: &std::path::Path) -> Result<Vec<u8>, VoxError> {
+    let message = encode_message(parts)?;
+    retry_message(&message, |message| request_message_at(message, runtime))
+}
+
+fn retry_message<T>(
+    message: &[u8],
+    mut operation: impl FnMut(&[u8]) -> Result<T, VoxError>,
+) -> Result<T, VoxError> {
+    match operation(message) {
+        Ok(response) => Ok(response),
+        Err(error) if error.code() == "fcitx.transport_failed" => operation(message),
+        Err(error) => Err(error),
+    }
+}
+
+fn request_once(parts: &[&[u8]]) -> Result<Vec<u8>, VoxError> {
+    let runtime = runtime_dir()?;
+    request_once_at(parts, &runtime)
+}
+
+fn request_once_at(parts: &[&[u8]], runtime: &std::path::Path) -> Result<Vec<u8>, VoxError> {
+    let message = encode_message(parts)?;
+    request_message_at(&message, runtime)
+}
+
+fn request_message_at(message: &[u8], runtime: &std::path::Path) -> Result<Vec<u8>, VoxError> {
+    fs::create_dir_all(runtime).map_err(transport_io)?;
     let client_path = runtime.join(format!(
         "fcitx-client-{}-{}.sock",
         std::process::id(),
@@ -145,6 +196,16 @@ fn request(parts: &[&[u8]]) -> Result<Vec<u8>, VoxError> {
     socket
         .set_read_timeout(Some(Duration::from_millis(500)))
         .map_err(transport_io)?;
+    socket
+        .send_to(message, runtime.join("fcitx.sock"))
+        .map_err(transport_io)?;
+    let mut response = vec![0_u8; 4 * 1024];
+    let size = socket.recv(&mut response).map_err(transport_io)?;
+    response.truncate(size);
+    Ok(response)
+}
+
+fn encode_message(parts: &[&[u8]]) -> Result<Vec<u8>, VoxError> {
     let message = parts
         .iter()
         .enumerate()
@@ -155,13 +216,14 @@ fn request(parts: &[&[u8]]) -> Result<Vec<u8>, VoxError> {
             message.extend_from_slice(part);
             message
         });
-    socket
-        .send_to(&message, runtime.join("fcitx.sock"))
-        .map_err(transport_io)?;
-    let mut response = vec![0_u8; 4 * 1024];
-    let size = socket.recv(&mut response).map_err(transport_io)?;
-    response.truncate(size);
-    Ok(response)
+    if message.len() > 60 * 1024 {
+        return Err(VoxError::new(
+            ErrorCategory::Protocol,
+            "fcitx.message_too_large",
+            "Fcitx bridge request exceeds the bounded datagram size",
+        ));
+    }
+    Ok(message)
 }
 
 fn expect_ok(response: &[u8]) -> Result<(), VoxError> {
@@ -196,6 +258,25 @@ fn expect_dispatched(response: &[u8]) -> Result<(), VoxError> {
             ErrorCategory::Protocol,
             "fcitx.dispatch_unconfirmed",
             "Fcitx bridge did not confirm dispatch to the input context",
+        ))
+    }
+}
+
+fn expect_dispatched_for(response: &[u8], request_id: &str) -> Result<(), VoxError> {
+    expect_ok(response)?;
+    let mut fields = response.split(|byte| *byte == 0);
+    let _status = fields.next();
+    let detail = fields.next().unwrap_or_default();
+    let echoed_id = fields
+        .next()
+        .and_then(|value| std::str::from_utf8(value).ok());
+    if matches!(detail, b"dispatched" | b"committed") && echoed_id == Some(request_id) {
+        Ok(())
+    } else {
+        Err(VoxError::new(
+            ErrorCategory::Protocol,
+            "fcitx.dispatch_unconfirmed",
+            "Fcitx bridge did not confirm dispatch for this request id",
         ))
     }
 }
@@ -252,6 +333,44 @@ mod tests {
         expect_dispatched(b"OK\0committed").expect("accept previous addon during upgrade");
         let error = expect_dispatched(b"OK\0queued").expect_err("queued is not dispatched");
         assert_eq!(error.code(), "fcitx.dispatch_unconfirmed");
+    }
+
+    #[test]
+    fn commit_ack_must_echo_request_id() {
+        expect_dispatched_for(b"OK\0dispatched\0req-1", "req-1").expect("matching request id");
+        let error = expect_dispatched_for(b"OK\0dispatched\0req-2", "req-1")
+            .expect_err("mismatched request id");
+        assert_eq!(error.code(), "fcitx.dispatch_unconfirmed");
+    }
+
+    #[test]
+    fn rejects_oversized_bridge_message_before_send() {
+        let text = vec![b'x'; 60 * 1024];
+        let error = encode_message(&[b"PING", text.as_slice()]).expect_err("must reject");
+        assert_eq!(error.code(), "fcitx.message_too_large");
+    }
+
+    #[test]
+    fn transport_retry_reuses_the_same_commit_request_id() {
+        let message =
+            encode_message(&[b"COMMIT2", b"req-test", b"session-1", b"hello"]).expect("message");
+        let mut attempts = Vec::new();
+        let response = retry_message(&message, |attempt| {
+            attempts.push(attempt.to_vec());
+            if attempts.len() == 1 {
+                Err(VoxError::new(
+                    ErrorCategory::Unavailable,
+                    "fcitx.transport_failed",
+                    "simulated lost ACK",
+                ))
+            } else {
+                Ok(b"OK\0dispatched\0req-test".to_vec())
+            }
+        })
+        .expect("retry succeeds");
+        expect_dispatched_for(&response, "req-test").expect("matching retry ack");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0], attempts[1]);
     }
 
     #[test]

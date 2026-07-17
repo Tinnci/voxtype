@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -58,6 +59,22 @@ std::string response(std::string_view status, std::string_view detail) {
     std::string value(status);
     value.push_back('\0');
     value.append(detail);
+    return value;
+}
+
+std::string dispatchedResponse(std::string_view requestId) {
+    auto value = response("OK", "dispatched");
+    value.push_back('\0');
+    value.append(requestId);
+    return value;
+}
+
+std::uint64_t textFingerprint(std::string_view text) {
+    std::uint64_t value = 14695981039346656037ULL;
+    for (const auto character : text) {
+        value ^= static_cast<unsigned char>(character);
+        value *= 1099511628211ULL;
+    }
     return value;
 }
 
@@ -153,10 +170,15 @@ private:
         std::array<char, MaxDatagramSize> buffer{};
         sockaddr_un sender{};
         socklen_t senderLength = sizeof(sender);
-        const auto size = recvfrom(socketFd_, buffer.data(), buffer.size(), 0,
+        const auto size = recvfrom(socketFd_, buffer.data(), buffer.size(), MSG_TRUNC,
                                    reinterpret_cast<sockaddr *>(&sender),
                                    &senderLength);
         if (size <= 0) {
+            return;
+        }
+        if (static_cast<std::size_t>(size) > buffer.size()) {
+            sendResponse(response("ERR", "message-too-large"), sender,
+                         senderLength);
             return;
         }
         const std::string_view message(buffer.data(), static_cast<std::size_t>(size));
@@ -168,6 +190,10 @@ private:
             response = arm(field(message, 1));
         } else if (command == "COMMIT") {
             commit(field(message, 1), field(message, 2), sender, senderLength);
+            return;
+        } else if (command == "COMMIT2") {
+            commit2(field(message, 1), field(message, 2), field(message, 3),
+                    sender, senderLength);
             return;
         } else if (command == "CANCEL") {
             response = cancel(field(message, 1));
@@ -197,6 +223,10 @@ private:
 
     void commit(std::string_view session, std::string_view text,
                 sockaddr_un sender, socklen_t senderLength) {
+        if (legacyCommitPending_ || !pendingRequestId_.empty()) {
+            sendResponse(response("ERR", "commit-busy"), sender, senderLength);
+            return;
+        }
         auto *context = armedContext_.get();
         if (session != armedSession_) {
             sendResponse(response("ERR", "session-mismatch"), sender,
@@ -222,6 +252,7 @@ private:
             return;
         }
         const std::string pendingText(text);
+        legacyCommitPending_ = true;
         pendingCommit_ = instance_->eventLoop().addDeferEvent(
             [this, pendingText, sender, senderLength](EventSource *) {
                 auto *pendingContext = armedContext_.get();
@@ -238,7 +269,102 @@ private:
                 }
                 armedContext_.unwatch();
                 armedSession_.clear();
+                legacyCommitPending_ = false;
                 sendResponse(result, sender, senderLength);
+                return true;
+            });
+        pendingCommit_->setOneShot();
+    }
+
+    void commit2(std::string_view requestId, std::string_view session,
+                 std::string_view text, sockaddr_un sender,
+                 socklen_t senderLength) {
+        if (requestId.empty()) {
+            sendResponse(response("ERR", "request-id-required"), sender,
+                         senderLength);
+            return;
+        }
+        if (requestId == completedRequestId_) {
+            if (session == completedSession_ && text.size() == completedTextSize_ &&
+                textFingerprint(text) == completedTextFingerprint_) {
+                sendResponse(completedResponse_, sender, senderLength);
+            } else {
+                sendResponse(response("ERR", "request-id-mismatch"), sender,
+                             senderLength);
+            }
+            return;
+        }
+        if (requestId == pendingRequestId_) {
+            if (session == pendingSession_ && text == pendingText_) {
+                pendingSender_ = sender;
+                pendingSenderLength_ = senderLength;
+            } else {
+                sendResponse(response("ERR", "request-id-mismatch"), sender,
+                             senderLength);
+            }
+            return;
+        }
+        if (legacyCommitPending_ || !pendingRequestId_.empty()) {
+            sendResponse(response("ERR", "commit-busy"), sender, senderLength);
+            return;
+        }
+        auto *context = armedContext_.get();
+        if (session != armedSession_) {
+            sendResponse(response("ERR", "session-mismatch"), sender,
+                         senderLength);
+            return;
+        }
+        if (!context || !context->hasFocus() ||
+            context != instance_->lastFocusedInputContext()) {
+            clear();
+            sendResponse(response("ERR", "focus-changed"), sender,
+                         senderLength);
+            return;
+        }
+        if (isSecure(context)) {
+            clear();
+            sendResponse(response("ERR", "secure-context"), sender,
+                         senderLength);
+            return;
+        }
+        if (text.empty()) {
+            sendResponse(response("ERR", "empty-text"), sender,
+                         senderLength);
+            return;
+        }
+        pendingRequestId_ = requestId;
+        pendingSession_ = session;
+        pendingText_ = text;
+        pendingSender_ = sender;
+        pendingSenderLength_ = senderLength;
+        pendingCommit_ = instance_->eventLoop().addDeferEvent(
+            [this](EventSource *) {
+                auto *pendingContext = armedContext_.get();
+                std::string result;
+                if (pendingContext && pendingContext->hasFocus() &&
+                    pendingContext == instance_->lastFocusedInputContext() &&
+                    !isSecure(pendingContext)) {
+                    pendingContext->commitString(pendingText_);
+                    result = dispatchedResponse(pendingRequestId_);
+                } else if (pendingContext && isSecure(pendingContext)) {
+                    result = response("ERR", "secure-context");
+                } else {
+                    result = response("ERR", "focus-changed");
+                }
+                completedRequestId_ = pendingRequestId_;
+                completedSession_ = pendingSession_;
+                completedTextSize_ = pendingText_.size();
+                completedTextFingerprint_ = textFingerprint(pendingText_);
+                completedResponse_ = result;
+                const auto recipient = pendingSender_;
+                const auto recipientLength = pendingSenderLength_;
+                pendingRequestId_.clear();
+                pendingSession_.clear();
+                pendingText_.clear();
+                pendingSenderLength_ = 0;
+                armedContext_.unwatch();
+                armedSession_.clear();
+                sendResponse(result, recipient, recipientLength);
                 return true;
             });
         pendingCommit_->setOneShot();
@@ -260,6 +386,11 @@ private:
 
     void clear() {
         pendingCommit_.reset();
+        legacyCommitPending_ = false;
+        pendingRequestId_.clear();
+        pendingSession_.clear();
+        pendingText_.clear();
+        pendingSenderLength_ = 0;
         armedContext_.unwatch();
         armedSession_.clear();
     }
@@ -272,6 +403,17 @@ private:
     std::unique_ptr<EventSource> pendingCommit_;
     TrackableObjectReference<InputContext> armedContext_;
     std::string armedSession_;
+    bool legacyCommitPending_ = false;
+    std::string pendingRequestId_;
+    std::string pendingSession_;
+    std::string pendingText_;
+    sockaddr_un pendingSender_{};
+    socklen_t pendingSenderLength_ = 0;
+    std::string completedRequestId_;
+    std::string completedSession_;
+    std::size_t completedTextSize_ = 0;
+    std::uint64_t completedTextFingerprint_ = 0;
+    std::string completedResponse_;
 };
 
 class VoxTypeBridgeFactory final : public AddonFactory {

@@ -186,10 +186,11 @@ doubles at protocol and process boundaries so failure behavior remains testable.
 - Replace KGlobalAccel launcher pairs with a press/release-capable portal or KDE
   adapter for true push-to-talk. Separate Start/Stop actions remain useful but
   are not push-to-talk.
-- Replace the Fcitx datagram's timeout-based delivery assumption with a
-  versioned, bounded, idempotent request protocol. Surrounding text, cursor,
-  selection, capabilities, and focus generation are required before checking
-  text that predates VoxType's private transcript history.
+- Fcitx `COMMIT2` now uses a bounded request ID, one safe retry, in-flight
+  recipient replacement, and a cached terminal response. Lost ACKs therefore
+  do not require duplicate dispatch. Surrounding text, cursor, selection,
+  capabilities, and focus generation are still required before checking text
+  that predates VoxType's private transcript history.
 
 ### Keep as test doubles
 
