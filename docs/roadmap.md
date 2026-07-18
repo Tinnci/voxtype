@@ -15,10 +15,13 @@ Raw 20 ms Opus packet encoding now uses the system `libopus` through a small,
 replaceable safe wrapper. The pure session state machine now rejects invalid
 lifecycle transitions, mismatched request IDs, non-zero status, stale packets,
 empty finals, and late results after cancellation while preserving precise audio
-acceptance evidence. Production endpoint/client-identity templates, the actual
-WebSocket/TLS I/O worker, and live verification remain gated by the
-distribution/licensing decision. The root `doubao-unofficial` feature remains
-disabled by default until those gates are satisfied.
+acceptance evidence. The nonblocking WebSocket/TLS layer now has bounded buffers,
+cancellable TCP/handshake phases, binary/control-frame handling, automatic pong
+flushes, and deterministic loopback coverage. Production endpoint/client-identity
+templates, PCM/session orchestration, daemon integration, and live verification
+remain gated by the distribution/licensing decision. The root
+`doubao-unofficial` feature remains disabled by default until those gates are
+satisfied.
 
 ## Phase 0: decisions and spikes
 

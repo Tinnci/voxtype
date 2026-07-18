@@ -25,11 +25,21 @@ one raw Opus packet. A transport-independent session state machine now enforces
 the task/session lifecycle, request-ID matching, non-zero status failures,
 first/middle/last ordering, packet deduplication, cancellation terminality, and
 the requirement that a non-empty final transcript arrive before
-`SessionFinished`.
+`SessionFinished`. Token-bearing control requests use zeroizing buffers.
+
+The WebSocket transport now performs bounded TCP connection attempts and a
+cancellable nonblocking TLS/HTTP upgrade with redirects disabled by construction.
+It limits frame/message/write-buffer memory, handles binary and control frames,
+flushes automatic pong responses, and maps errors without exposing the query or
+headers. Loopback tests verify custom headers, binary duplex, ping/pong, remote
+plain-WS rejection, and cancellation during a stalled handshake.
 
 The crate deliberately contains no built-in production endpoint or Android
 identity template. The caller must supply both under an explicit distribution
-policy. WebSocket/TLS, daemon wiring, and live opt-in verification remain.
+policy. Full PCM/session orchestration, daemon wiring, and live opt-in
+verification remain. DNS still uses the standard resolver and is the only
+connection operation that cannot be interrupted by the current cancellation
+token.
 The root binary exposes a default-off `doubao-unofficial` build feature so this
 protocol is not linked into normal distribution builds merely because the
 workspace tests its isolated crate.
@@ -191,10 +201,11 @@ non-interim and VAD has finished. The session remains open until
 
 The Rust session protocol preserves provider transcript bytes, ignores duplicate
 or older packet numbers, and never lets a stale partial overwrite a newer final.
-Building an audio request does not itself mark audio uploaded: the I/O layer must
-explicitly confirm the successful socket write, which changes replay evidence
-from `NotAccepted` to `PossiblyAccepted`. A matching provider result advances it
-to `Accepted`.
+Building an audio request does not itself mark audio uploaded. A fully flushed
+socket write is explicitly confirmed; a partial/ambiguous write separately
+changes replay evidence to `PossiblyAccepted` without falsely incrementing sent
+frames. Only VAD/text/final evidence—not a packet number alone—advances it to
+`Accepted`.
 
 ## Error and retry policy
 

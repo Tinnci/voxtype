@@ -5,6 +5,7 @@ use std::fmt::{self, Display, Formatter};
 
 use voxtype_core::AudioAcceptance;
 use voxtype_provider_common::SecretString;
+use zeroize::Zeroizing;
 
 use crate::{
     FrameState, RecognitionEvent, decode_response, encode_request, parse_recognition_event,
@@ -52,6 +53,25 @@ pub enum SessionEvent {
     Recognition(RecognitionEvent),
     DuplicateIgnored,
     Finished(SessionOutcome),
+}
+
+/// Token-bearing request bytes that are cleared when dropped.
+pub struct SecretRequest(Zeroizing<Vec<u8>>);
+
+impl SecretRequest {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretRequest {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("SecretRequest")
+            .field(&format_args!("[{} redacted bytes]", self.0.len()))
+            .finish()
+    }
 }
 
 /// Pure protocol state machine used by the WebSocket I/O worker.
@@ -120,17 +140,20 @@ impl DoubaoSessionProtocol {
     /// # Errors
     ///
     /// Returns a lifecycle error unless the protocol is disconnected.
-    pub fn start_task(&mut self, token: &SecretString) -> Result<Vec<u8>, SessionProtocolError> {
+    pub fn start_task(
+        &mut self,
+        token: &SecretString,
+    ) -> Result<SecretRequest, SessionProtocolError> {
         self.require_phase(SessionPhase::Disconnected, "doubao.task_already_started")?;
         self.phase = SessionPhase::TaskStarting;
-        Ok(encode_request(
+        Ok(SecretRequest(Zeroizing::new(encode_request(
             token.expose(),
             "StartTask",
             &[],
             &[],
             &self.request_id,
             None,
-        ))
+        ))))
     }
 
     /// Builds the bounded `StartSession` message after `TaskStarted`.
@@ -142,7 +165,7 @@ impl DoubaoSessionProtocol {
         &mut self,
         token: &SecretString,
         session_json: &[u8],
-    ) -> Result<Vec<u8>, SessionProtocolError> {
+    ) -> Result<SecretRequest, SessionProtocolError> {
         self.require_phase(SessionPhase::TaskStarted, "doubao.task_not_started")?;
         if session_json.len() > MAX_SESSION_JSON_BYTES
             || !serde_json::from_slice::<serde_json::Value>(session_json)
@@ -155,14 +178,14 @@ impl DoubaoSessionProtocol {
             ));
         }
         self.phase = SessionPhase::SessionStarting;
-        Ok(encode_request(
+        Ok(SecretRequest(Zeroizing::new(encode_request(
             token.expose(),
             "StartSession",
             session_json,
             &[],
             &self.request_id,
             None,
-        ))
+        ))))
     }
 
     /// Builds one `TaskRequest` for a real independently encoded Opus packet.
@@ -230,6 +253,27 @@ impl DoubaoSessionProtocol {
         Ok(())
     }
 
+    /// Records that a pending audio message may have been partially written.
+    ///
+    /// The frame is not counted as fully sent, but replay becomes unsafe. This
+    /// is used when WebSocket flush fails after accepting the message into its
+    /// internal write buffer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects calls without a pending real audio request.
+    pub fn mark_audio_write_ambiguous(&mut self) -> Result<(), SessionProtocolError> {
+        self.require_phase(SessionPhase::Streaming, "doubao.session_not_streaming")?;
+        if self.input_state != InputState::AudioRequestPending {
+            return Err(self.fail(
+                "doubao.no_pending_audio_request",
+                "Doubao has no pending audio request to mark ambiguous",
+            ));
+        }
+        self.audio_acceptance = AudioAcceptance::PossiblyAccepted;
+        Ok(())
+    }
+
     /// Builds the observed 100-byte zero last-frame marker.
     ///
     /// # Errors
@@ -270,7 +314,7 @@ impl DoubaoSessionProtocol {
     pub fn finish_session(
         &mut self,
         token: &SecretString,
-    ) -> Result<Vec<u8>, SessionProtocolError> {
+    ) -> Result<SecretRequest, SessionProtocolError> {
         self.require_phase(SessionPhase::Streaming, "doubao.session_not_streaming")?;
         if self.input_state != InputState::Finished {
             return Err(self.fail(
@@ -279,14 +323,14 @@ impl DoubaoSessionProtocol {
             ));
         }
         self.phase = SessionPhase::Finishing;
-        Ok(encode_request(
+        Ok(SecretRequest(Zeroizing::new(encode_request(
             token.expose(),
             "FinishSession",
             &[],
             &[],
             &self.request_id,
             None,
-        ))
+        ))))
     }
 
     /// Consumes one binary provider response and advances the lifecycle.
@@ -406,7 +450,7 @@ impl DoubaoSessionProtocol {
         }
         self.provider_vad_started |= event.vad_started;
         self.provider_vad_finished |= event.vad_finished;
-        if event.vad_started || event.text.is_some() || event.packet_number.is_some() {
+        if event.vad_started || event.text.is_some() || event.final_result {
             self.audio_acceptance = AudioAcceptance::Accepted;
         }
         if event.final_result {
@@ -610,6 +654,41 @@ mod tests {
         assert_eq!(outcome.sent_audio_frames, 1);
         assert_eq!(outcome.last_packet_number, Some(2));
         assert_eq!(protocol.phase(), SessionPhase::Finished);
+    }
+
+    #[test]
+    fn token_requests_are_redacted_and_ambiguous_writes_block_replay() {
+        let token = SecretString::try_new("token-fixture".to_owned()).expect("token");
+        let mut initial =
+            DoubaoSessionProtocol::new("request-fixture".to_owned()).expect("session");
+        let start = initial.start_task(&token).expect("StartTask");
+        assert!(!format!("{start:?}").contains("token-fixture"));
+        assert!(!start.as_bytes().is_empty());
+
+        let (mut protocol, _) = ready_protocol();
+        protocol.audio_request(1_000, &[1]).expect("audio");
+        protocol
+            .mark_audio_write_ambiguous()
+            .expect("ambiguous socket write");
+        assert_eq!(
+            protocol.audio_acceptance(),
+            AudioAcceptance::PossiblyAccepted
+        );
+        assert_eq!(protocol.sent_audio_frames(), 0);
+
+        let heartbeat = r#"{"extra":{"packet_number":1}}"#;
+        protocol
+            .handle_binary(&response(
+                "request-fixture",
+                "Result",
+                None,
+                Some(heartbeat),
+            ))
+            .expect("packet heartbeat");
+        assert_eq!(
+            protocol.audio_acceptance(),
+            AudioAcceptance::PossiblyAccepted
+        );
     }
 
     #[test]

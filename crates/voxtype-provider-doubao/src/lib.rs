@@ -7,6 +7,7 @@
 
 pub mod opus_codec;
 pub mod session;
+pub mod websocket;
 
 use serde_json::Value;
 use std::error::Error;
