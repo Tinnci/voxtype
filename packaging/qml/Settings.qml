@@ -733,11 +733,17 @@ ApplicationWindow {
                                 spacing: 9
                                 RowLayout {
                                     Layout.fillWidth: true
-                                    Label { text: modelData.kind; font.bold: true }
+                                    Label { text: modelData.display_name || modelData.kind; font.bold: true }
                                     Label {
                                         visible: modelData.kind === "mock"
                                         text: qsTr("演示固定文本 · 不执行 ASR")
                                         color: "#f59e0b"
+                                    }
+                                    Label {
+                                        visible: modelData.kind === "doubao-unofficial"
+                                        text: qsTr("非官方 · 未文档化协议")
+                                        color: "#f59e0b"
+                                        font.bold: true
                                     }
                                     Item { Layout.fillWidth: true }
                                     Label {
@@ -819,6 +825,7 @@ ApplicationWindow {
                                 }
                                 Rectangle {
                                     visible: modelData.secret_ref.length > 0
+                                        && modelData.credential_mode !== "managed-bootstrap"
                                     Layout.fillWidth: true
                                     implicitHeight: keyRow.implicitHeight + 20
                                     radius: 8
@@ -845,6 +852,58 @@ ApplicationWindow {
                                                         secretInput.clear()
                                                         root.refresh(qsTr("API 密钥已保存到 Secret Service / KWallet"))
                                                     })
+                                            }
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    visible: modelData.credential_mode === "managed-bootstrap"
+                                    Layout.fillWidth: true
+                                    implicitHeight: managedCredentialColumn.implicitHeight + 20
+                                    radius: 8
+                                    color: palette.alternateBase
+                                    ColumnLayout {
+                                        id: managedCredentialColumn
+                                        anchors.fill: parent
+                                        anchors.margins: 10
+                                        spacing: 8
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: qsTr("此 Provider 使用非官方、未文档化的兼容协议，可能随上游变更而失效。它不是豆包或火山引擎官方开放 API。音频会发送到第三方服务。")
+                                            wrapMode: Text.Wrap
+                                            color: "#f59e0b"
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Label { text: modelData.secret_ref; font.family: "monospace" }
+                                            Label {
+                                                text: modelData.secret_state === "configured"
+                                                    ? qsTr("托管凭据已保存 · ASR 仍需真实验证")
+                                                    : qsTr("托管凭据未配置")
+                                                color: modelData.secret_state === "configured" ? "#22c55e" : "#ef4444"
+                                            }
+                                            Item { Layout.fillWidth: true }
+                                        }
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            TrackedTextField {
+                                                id: managedCredentialInput
+                                                Layout.fillWidth: true
+                                                placeholderText: qsTr("粘贴单行、版本化的托管凭据 JSON")
+                                                echoMode: TextInput.Password
+                                                passwordMaskDelay: 0
+                                            }
+                                            Button {
+                                                text: qsTr("安全保存凭据包")
+                                                enabled: managedCredentialInput.text.length > 0
+                                                onClicked: {
+                                                    const bundle = managedCredentialInput.text
+                                                    root.callApi("POST", "/secret/" + encodeURIComponent(modelData.secret_ref),
+                                                        bundle, function() {
+                                                            managedCredentialInput.clear()
+                                                            root.refresh(qsTr("托管凭据包已保存到 Secret Service / KWallet"))
+                                                        })
+                                                }
                                             }
                                         }
                                     }
@@ -904,7 +963,9 @@ ApplicationWindow {
                                     Label { text: qsTr("失败 ") + modelData.usage.failures }
                                     Label { text: qsTr("音频 ") + root.formatAudio(modelData.usage.audio_millis) }
                                     Label {
-                                        text: modelData.usage.token_reports > 0
+                                        text: modelData.usage_capabilities.tokens === false
+                                            ? qsTr("服务不报告 Token 用量")
+                                            : modelData.usage.token_reports > 0
                                             ? qsTr("API Token ") + modelData.usage.reported_tokens
                                             : qsTr("API Token 未报告")
                                     }

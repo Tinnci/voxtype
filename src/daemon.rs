@@ -33,6 +33,10 @@ use voxtype_provider_common::CancellationToken;
 use voxtype_provider_deepgram::{
     DeepgramConfig, transcribe_pcm_with_evidence as transcribe_deepgram_pcm,
 };
+#[cfg(feature = "doubao-unofficial")]
+use voxtype_provider_doubao::managed::{
+    ManagedCredentialBundle, ManagedDoubaoConfig, transcribe_managed_pcm,
+};
 use voxtype_provider_rest::{
     ApiUsage, RestProviderConfig, transcribe_pcm_with_evidence as transcribe_pcm,
 };
@@ -142,6 +146,8 @@ enum PreparedProvider {
     Mock(String),
     Rest(RestProviderConfig),
     Deepgram(DeepgramConfig),
+    #[cfg(feature = "doubao-unofficial")]
+    Doubao(ManagedDoubaoConfig),
     Command {
         program: String,
         args: Vec<String>,
@@ -1458,6 +1464,22 @@ fn prepare_provider(provider: &ProviderConfig) -> Result<PreparedProvider, VoxEr
                 smart_format: *smart_format,
             }))
         }
+        #[cfg(feature = "doubao-unofficial")]
+        ProviderConfig::DoubaoUnofficial {
+            secret,
+            phase_timeout_seconds,
+            total_timeout_seconds,
+            frame_interval_millis,
+        } => {
+            let secret = lookup_secret(secret)?;
+            let credentials = ManagedCredentialBundle::parse(&secret)?;
+            Ok(PreparedProvider::Doubao(ManagedDoubaoConfig {
+                credentials,
+                phase_timeout: Duration::from_secs(*phase_timeout_seconds),
+                total_timeout: Duration::from_secs(*total_timeout_seconds),
+                frame_interval: Duration::from_millis(*frame_interval_millis),
+            }))
+        }
         ProviderConfig::Command {
             program,
             args,
@@ -1509,6 +1531,16 @@ fn invoke_provider(
                 }
             })
         }
+        #[cfg(feature = "doubao-unofficial")]
+        PreparedProvider::Doubao(config) => transcribe_managed_pcm(&config, pcm_path, cancellation)
+            .map(|result| ProviderInvocationSuccess {
+                transcript: ProviderTranscript {
+                    text: result.text,
+                    api_usage: ApiUsage::default(),
+                },
+                transport_started: true,
+                audio_acceptance: AudioAcceptance::Accepted,
+            }),
         PreparedProvider::Command {
             program,
             args,

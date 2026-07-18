@@ -160,6 +160,16 @@ pub enum ProviderConfig {
         #[serde(default = "default_true")]
         smart_format: bool,
     },
+    #[cfg(feature = "doubao-unofficial")]
+    DoubaoUnofficial {
+        secret: String,
+        #[serde(default = "default_timeout")]
+        phase_timeout_seconds: u64,
+        #[serde(default = "default_doubao_total_timeout")]
+        total_timeout_seconds: u64,
+        #[serde(default = "default_doubao_frame_interval")]
+        frame_interval_millis: u64,
+    },
     Command {
         program: String,
         #[serde(default)]
@@ -244,6 +254,8 @@ impl Config {
                 }
                 _ => {}
             }
+            #[cfg(feature = "doubao-unofficial")]
+            validate_doubao_provider(provider)?;
             let timeout_seconds = match provider {
                 ProviderConfig::OpenaiCompatible {
                     timeout_seconds, ..
@@ -254,6 +266,11 @@ impl Config {
                 | ProviderConfig::Command {
                     timeout_seconds, ..
                 } => timeout_seconds,
+                #[cfg(feature = "doubao-unofficial")]
+                ProviderConfig::DoubaoUnofficial {
+                    phase_timeout_seconds,
+                    ..
+                } => phase_timeout_seconds,
                 ProviderConfig::Mock { .. } => continue,
             };
             if !(1..=300).contains(timeout_seconds) {
@@ -278,19 +295,7 @@ impl Config {
                 }
             }
         }
-        for (provider, quota) in &self.quotas {
-            if !self.providers.contains_key(provider) {
-                return Err(configuration(&format!(
-                    "quota references unknown provider {provider}"
-                )));
-            }
-            if matches!(quota.request_limit, Some(0))
-                || matches!(quota.audio_seconds_limit, Some(0))
-                || matches!(quota.token_limit, Some(0))
-            {
-                return Err(configuration("provider quota limits must be positive"));
-            }
-        }
+        validate_quotas(self)?;
         if self.audio.vad_rms_threshold == 0 || self.audio.vad_rms_threshold > 10_000 {
             return Err(configuration(
                 "VAD RMS threshold must be between 1 and 10000",
@@ -524,12 +529,64 @@ fn validate_routes(config: &Config) -> Result<(), VoxError> {
     Ok(())
 }
 
+fn validate_quotas(config: &Config) -> Result<(), VoxError> {
+    for (provider, quota) in &config.quotas {
+        if !config.providers.contains_key(provider) {
+            return Err(configuration(&format!(
+                "quota references unknown provider {provider}"
+            )));
+        }
+        if matches!(quota.request_limit, Some(0))
+            || matches!(quota.audio_seconds_limit, Some(0))
+            || matches!(quota.token_limit, Some(0))
+        {
+            return Err(configuration("provider quota limits must be positive"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "doubao-unofficial")]
+fn validate_doubao_provider(provider: &ProviderConfig) -> Result<(), VoxError> {
+    let ProviderConfig::DoubaoUnofficial {
+        secret,
+        phase_timeout_seconds,
+        total_timeout_seconds,
+        frame_interval_millis,
+    } = provider
+    else {
+        return Ok(());
+    };
+    if secret.trim().is_empty() {
+        return Err(configuration(
+            "Doubao managed credential reference is required",
+        ));
+    }
+    if total_timeout_seconds < phase_timeout_seconds
+        || *total_timeout_seconds > 3_600
+        || *frame_interval_millis > 100
+    {
+        return Err(configuration("Doubao session timing is invalid"));
+    }
+    Ok(())
+}
+
 const fn default_timeout() -> u64 {
     30
 }
 
 const fn default_true() -> bool {
     true
+}
+
+#[cfg(feature = "doubao-unofficial")]
+const fn default_doubao_total_timeout() -> u64 {
+    180
+}
+
+#[cfg(feature = "doubao-unofficial")]
+const fn default_doubao_frame_interval() -> u64 {
+    20
 }
 
 fn config_io(error: io::Error) -> VoxError {
@@ -689,6 +746,38 @@ mod tests {
         let serialized = toml::to_string_pretty(&config).expect("configuration serializes");
         assert!(serialized.contains("[providers.mock]"));
         assert!(!serialized.contains("api_key"));
+    }
+
+    #[cfg(feature = "doubao-unofficial")]
+    #[test]
+    fn round_trips_feature_gated_doubao_provider() {
+        let mut config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        config.providers.insert(
+            "doubao".to_owned(),
+            ProviderConfig::DoubaoUnofficial {
+                secret: "doubao-managed-bundle".to_owned(),
+                phase_timeout_seconds: 15,
+                total_timeout_seconds: 180,
+                frame_interval_millis: 20,
+            },
+        );
+        config
+            .profiles
+            .get_mut("test")
+            .expect("test profile")
+            .primary = "doubao".to_owned();
+        config.validate().expect("Doubao config validates");
+        let serialized = toml::to_string_pretty(&config).expect("configuration serializes");
+        assert!(!serialized.contains("device_id"));
+        assert!(!serialized.contains("app_key"));
+        let round_trip: Config = toml::from_str(&serialized).expect("configuration parses again");
+        assert!(matches!(
+            round_trip.providers["doubao"],
+            ProviderConfig::DoubaoUnofficial {
+                total_timeout_seconds: 180,
+                ..
+            }
+        ));
     }
 
     #[test]

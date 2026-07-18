@@ -22,10 +22,12 @@ streams bounded PCM frames through Opus while concurrently polling interim/final
 events, enforces phase/total deadlines, and returns replay-safe failure evidence.
 The runner now refreshes an authentication-failed StartTask token exactly once
 before any audio upload and never retries after ambiguous/accepted audio.
-Production endpoint/client-identity templates, managed bootstrap persistence,
-daemon integration, and live verification remain gated by the
-distribution/licensing decision. The root `doubao-unofficial` feature remains
-disabled by default until those gates are satisfied.
+Feature-gated daemon/config/settings integration now consumes a redacted,
+versioned Secret Service bundle and never places device identity or endpoints in
+TOML. Production client-identity generation, automatic registration/atomic
+bundle replacement, installation with the feature, and live verification remain
+gated by the distribution/licensing decision. The root `doubao-unofficial`
+feature remains disabled by default until those gates are satisfied.
 
 ## Phase 0: decisions and spikes
 

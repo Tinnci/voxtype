@@ -44,6 +44,14 @@ The root binary exposes a default-off `doubao-unofficial` build feature so this
 protocol is not linked into normal distribution builds merely because the
 workspace tests its isolated crate.
 
+Feature-enabled daemon/config wiring now reads a versioned managed credential
+bundle from Secret Service, fetches a fresh settings token, invokes the bounded
+runner, and returns provider-neutral transcript/error evidence. TOML stores only
+the secret reference and timing policy. The settings backend labels the provider
+as unofficial, does not expose endpoint/model fields, uses a distinct managed
+credential control, and marks token/account quota as unsupported. See
+`doubao-managed-credentials.md`.
+
 ## Observed service flow
 
 ```text

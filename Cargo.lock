@@ -1146,6 +1146,7 @@ version = "0.1.0-dev"
 dependencies = [
  "md5",
  "opus",
+ "serde",
  "serde_json",
  "tungstenite",
  "voxtype-core",

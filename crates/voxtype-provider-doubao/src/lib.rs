@@ -5,6 +5,7 @@
 //! documented bootstrap HTTP, protobuf, 20 ms PCM/Opus framing, and provider
 //! event primitives for a future session transport.
 
+pub mod managed;
 pub mod opus_codec;
 pub mod runner;
 pub mod session;

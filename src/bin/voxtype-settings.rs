@@ -375,6 +375,20 @@ fn provider_state(
                 json!(timeout_seconds),
                 json!(smart_format),
             ),
+            #[cfg(feature = "doubao-unofficial")]
+            ProviderConfig::DoubaoUnofficial {
+                secret,
+                phase_timeout_seconds,
+                ..
+            } => (
+                "doubao-unofficial",
+                "",
+                "",
+                secret.as_str(),
+                secret_state(secret),
+                json!(phase_timeout_seconds),
+                Value::Null,
+            ),
             ProviderConfig::Command {
                 program,
                 timeout_seconds,
@@ -400,6 +414,15 @@ fn provider_state(
         "health": health,
         "timeout_seconds": timeout_seconds,
         "smart_format": smart_format,
+        "display_name": if kind == "doubao-unofficial" { "Doubao（非官方兼容）" } else { kind },
+        "risk_label": if kind == "doubao-unofficial" { "unofficial-undocumented" } else { "" },
+        "credential_mode": if kind == "doubao-unofficial" { "managed-bootstrap" } else if secret_ref.is_empty() { "none" } else { "api-key" },
+        "usage_capabilities": {
+            "requests": true,
+            "audio": true,
+            "tokens": kind != "doubao-unofficial",
+            "account_quota": false,
+        },
         "usage": usage,
         "quota": quota.cloned().unwrap_or_default(),
     })
@@ -611,6 +634,13 @@ fn save_provider(provider: &str, body: &[u8]) -> io::Result<Response> {
             if let Some(value) = update.smart_format {
                 *smart_format = value;
             }
+        }
+        #[cfg(feature = "doubao-unofficial")]
+        ProviderConfig::DoubaoUnofficial { .. } => {
+            return Ok(Response::error(
+                400,
+                "Doubao managed credentials are edited through Secret Service",
+            ));
         }
         ProviderConfig::Mock { .. } | ProviderConfig::Command { .. } => {
             return Ok(Response::error(
@@ -887,6 +917,29 @@ mod tests {
     #[test]
     fn escapes_json_pointer_segments() {
         assert_eq!(json_pointer_escape("a/b~c"), "a~1b~0c");
+    }
+
+    #[cfg(feature = "doubao-unofficial")]
+    #[test]
+    fn exposes_doubao_as_managed_unofficial_without_token_usage() {
+        let provider = ProviderConfig::DoubaoUnofficial {
+            secret: "missing-test-bundle".to_owned(),
+            phase_timeout_seconds: 15,
+            total_timeout_seconds: 180,
+            frame_interval_millis: 20,
+        };
+        let state = provider_state(
+            "doubao",
+            &provider,
+            &empty_usage(),
+            None,
+            &json!({"route_available": true, "verified": false}),
+        );
+        assert_eq!(state["kind"], "doubao-unofficial");
+        assert_eq!(state["credential_mode"], "managed-bootstrap");
+        assert_eq!(state["risk_label"], "unofficial-undocumented");
+        assert_eq!(state["usage_capabilities"]["tokens"], false);
+        assert_eq!(state["endpoint"], "");
     }
 
     #[test]
