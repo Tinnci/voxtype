@@ -39,7 +39,7 @@ impl SystemOpusEncoder {
     /// Returns a stable error if the installed `libopus` cannot create the
     /// requested encoder.
     pub fn new() -> Result<Self, OpusCodecError> {
-        Encoder::new(16_000, Channels::Mono, Application::Voip)
+        Encoder::new(16_000, Channels::Mono, Application::Audio)
             .map(|encoder| Self { encoder })
             .map_err(|_| OpusCodecError("could not initialize the Opus encoder"))
     }

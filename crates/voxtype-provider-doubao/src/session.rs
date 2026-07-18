@@ -570,8 +570,11 @@ fn auth_like_response(response: &crate::ResponseEnvelope) -> bool {
 }
 
 fn timestamp_json(timestamp_millis: u64) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({ "timestamp": timestamp_millis }))
-        .expect("serializing a u64 timestamp cannot fail")
+    serde_json::to_vec(&serde_json::json!({
+        "extra": {},
+        "timestamp_ms": timestamp_millis,
+    }))
+    .expect("serializing a u64 timestamp cannot fail")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -753,6 +756,19 @@ mod tests {
         assert_eq!(
             protocol.audio_acceptance(),
             AudioAcceptance::PossiblyAccepted
+        );
+    }
+
+    #[test]
+    fn task_request_uses_observed_timestamp_payload() {
+        let (mut protocol, _) = ready_protocol();
+        let request = protocol
+            .audio_request(123_456, &[1])
+            .expect("audio request");
+        assert!(
+            request
+                .windows(br#"{"extra":{},"timestamp_ms":123456}"#.len())
+                .any(|window| window == br#"{"extra":{},"timestamp_ms":123456}"#)
         );
     }
 

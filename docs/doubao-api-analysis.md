@@ -176,7 +176,8 @@ reader thread is created.
 - PCM samples per frame: 320.
 - PCM bytes per frame: 640.
 - Transport payload: one independently encoded Opus frame per task request.
-- Timestamp: session start milliseconds plus `frame_index * 20`.
+- TaskRequest JSON: `extra` is an empty object and `timestamp_ms` is session
+  start milliseconds plus `frame_index * 20`.
 - Sending and receiving must run concurrently to observe partial results and
   avoid upstream socket backpressure.
 
