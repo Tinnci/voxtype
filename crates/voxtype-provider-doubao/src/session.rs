@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use voxtype_core::AudioAcceptance;
+use voxtype_core::{AudioAcceptance, ErrorCategory};
 use voxtype_provider_common::SecretString;
 use zeroize::Zeroizing;
 
@@ -375,12 +375,28 @@ impl DoubaoSessionProtocol {
             ));
         }
         if response.status_code != 0 {
+            if self.phase == SessionPhase::TaskStarting && auth_like_response(&response) {
+                return Err(self.fail_with_category(
+                    ErrorCategory::Authentication,
+                    "doubao.start_task_auth_failed",
+                    "Doubao rejected the StartTask credential",
+                ));
+            }
             return Err(self.fail(
                 "doubao.remote_status_failed",
                 "Doubao returned a non-zero protocol status",
             ));
         }
         match response.message_type.as_str() {
+            "TaskFailed"
+                if self.phase == SessionPhase::TaskStarting && auth_like_response(&response) =>
+            {
+                Err(self.fail_with_category(
+                    ErrorCategory::Authentication,
+                    "doubao.start_task_auth_failed",
+                    "Doubao rejected the StartTask credential",
+                ))
+            }
             "TaskFailed" | "SessionFailed" => Err(self.fail(
                 "doubao.remote_session_failed",
                 "Doubao rejected the recognition session",
@@ -515,11 +531,42 @@ impl DoubaoSessionProtocol {
     }
 
     fn fail(&mut self, code: &'static str, message: &'static str) -> SessionProtocolError {
+        self.fail_with_category(ErrorCategory::Protocol, code, message)
+    }
+
+    fn fail_with_category(
+        &mut self,
+        category: ErrorCategory,
+        code: &'static str,
+        message: &'static str,
+    ) -> SessionProtocolError {
         if self.phase != SessionPhase::Cancelled {
             self.phase = SessionPhase::Failed;
         }
-        SessionProtocolError::new(code, message)
+        SessionProtocolError::with_category(category, code, message)
     }
+}
+
+fn auth_like_response(response: &crate::ResponseEnvelope) -> bool {
+    if matches!(response.status_code, 401 | 403) {
+        return true;
+    }
+    let normalized: String = response
+        .status_message
+        .chars()
+        .take(1024)
+        .flat_map(char::to_lowercase)
+        .collect();
+    [
+        "token",
+        "auth",
+        "credential",
+        "app_key",
+        "unauthorized",
+        "forbidden",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
 }
 
 fn timestamp_json(timestamp_millis: u64) -> Vec<u8> {
@@ -529,13 +576,31 @@ fn timestamp_json(timestamp_millis: u64) -> Vec<u8> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionProtocolError {
+    category: ErrorCategory,
     code: &'static str,
     message: &'static str,
 }
 
 impl SessionProtocolError {
     const fn new(code: &'static str, message: &'static str) -> Self {
-        Self { code, message }
+        Self::with_category(ErrorCategory::Protocol, code, message)
+    }
+
+    const fn with_category(
+        category: ErrorCategory,
+        code: &'static str,
+        message: &'static str,
+    ) -> Self {
+        Self {
+            category,
+            code,
+            message,
+        }
+    }
+
+    #[must_use]
+    pub const fn category(self) -> ErrorCategory {
+        self.category
     }
 
     #[must_use]
@@ -770,6 +835,27 @@ mod tests {
             .handle_binary(&response("request-fixture", "SessionFailed", None, None))
             .expect_err("explicit failure must fail");
         assert_eq!(error.code(), "doubao.remote_session_failed");
+        assert_eq!(protocol.phase(), SessionPhase::Failed);
+    }
+
+    #[test]
+    fn start_task_token_failure_is_authentication_without_raw_message() {
+        let token = SecretString::try_new("token-fixture".to_owned()).expect("token");
+        let mut protocol =
+            DoubaoSessionProtocol::new("request-fixture".to_owned()).expect("session");
+        protocol.start_task(&token).expect("StartTask");
+        let mut failed = response("request-fixture", "TaskFailed", None, None);
+        write_bytes(
+            &mut failed,
+            6,
+            b"app_key token expired: provider-secret-detail",
+        );
+        let error = protocol
+            .handle_binary(&failed)
+            .expect_err("expired token must fail");
+        assert_eq!(error.category(), ErrorCategory::Authentication);
+        assert_eq!(error.code(), "doubao.start_task_auth_failed");
+        assert!(!error.to_string().contains("provider-secret-detail"));
         assert_eq!(protocol.phase(), SessionPhase::Failed);
     }
 

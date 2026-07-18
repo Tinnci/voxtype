@@ -82,6 +82,39 @@ pub fn transcribe_pcm_with_evidence(
     transcribe_pcm_with_encoder(config, token, pcm_path, cancellation, encoder)
 }
 
+/// Retries exactly once with a refreshed token only when `StartTask` reports
+/// authentication failure before any audio could have been accepted.
+///
+/// # Errors
+///
+/// Returns the first non-authentication failure, refresh failure, or the second
+/// attempt result. Audio is never replayed after `PossiblyAccepted` or
+/// `Accepted` evidence.
+pub fn transcribe_pcm_with_token_refresh<F>(
+    config: &DoubaoRunConfig,
+    initial_token: &SecretString,
+    pcm_path: &Path,
+    cancellation: &CancellationToken,
+    mut refresh: F,
+) -> Result<DoubaoTranscription, ProviderAttemptFailure>
+where
+    F: FnMut(&CancellationToken) -> Result<SecretString, VoxError>,
+{
+    match transcribe_pcm_with_evidence(config, initial_token, pcm_path, cancellation) {
+        Err(first)
+            if first.error.category() == ErrorCategory::Authentication
+                && first.audio_acceptance == AudioAcceptance::NotAccepted
+                && !cancellation.is_cancelled() =>
+        {
+            let refreshed = refresh(cancellation).map_err(|error| {
+                ProviderAttemptFailure::after_transport(error, AudioAcceptance::NotAccepted)
+            })?;
+            transcribe_pcm_with_evidence(config, &refreshed, pcm_path, cancellation)
+        }
+        result => result,
+    }
+}
+
 /// Runs one attempt with a replaceable encoder for deterministic transport
 /// tests.
 ///
@@ -511,7 +544,7 @@ fn unix_millis() -> Result<u64, VoxError> {
 
 fn protocol_vox_error(error: SessionProtocolError) -> VoxError {
     vox_error(
-        ErrorCategory::Protocol,
+        error.category(),
         error.code(),
         "Doubao session protocol validation failed",
         false,
@@ -590,6 +623,12 @@ mod tests {
         if let Some(result) = result {
             write_bytes(&mut output, 7, result.as_bytes());
         }
+        output
+    }
+
+    fn response_with_status_message(request_id: &str, kind: &str, message: &str) -> Vec<u8> {
+        let mut output = response(request_id, kind, None);
+        write_bytes(&mut output, 6, message.as_bytes());
         output
     }
 
@@ -763,6 +802,100 @@ mod tests {
         assert_eq!(error.audio_acceptance, AudioAcceptance::NotAccepted);
         assert!(error.transport_started);
         server.join().expect("timeout server");
+        fs::remove_file(path).expect("remove PCM fixture");
+    }
+
+    #[test]
+    fn start_task_authentication_refreshes_exactly_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind refresh server");
+        let address = listener.local_addr().expect("refresh address");
+        let server = thread::spawn(move || {
+            let (first_stream, _) = listener.accept().expect("accept first token");
+            let mut first = tungstenite::accept(first_stream).expect("first handshake");
+            assert_eq!(
+                request_method(&first.read().expect("first StartTask").into_data()),
+                "StartTask"
+            );
+            first
+                .send(tungstenite::Message::Binary(
+                    response_with_status_message(
+                        "request-refresh",
+                        "TaskFailed",
+                        "app_key token expired",
+                    )
+                    .into(),
+                ))
+                .expect("expired token response");
+            drop(first);
+
+            let (second_stream, _) = listener.accept().expect("accept refreshed token");
+            let mut second = tungstenite::accept(second_stream).expect("second handshake");
+            assert_eq!(
+                request_method(&second.read().expect("second StartTask").into_data()),
+                "StartTask"
+            );
+            second
+                .send(tungstenite::Message::Binary(
+                    response("request-refresh", "TaskStarted", None).into(),
+                ))
+                .expect("TaskStarted");
+            assert_eq!(
+                request_method(&second.read().expect("StartSession").into_data()),
+                "StartSession"
+            );
+            second
+                .send(tungstenite::Message::Binary(
+                    response("request-refresh", "SessionStarted", None).into(),
+                ))
+                .expect("SessionStarted");
+            loop {
+                let message = second.read().expect("refreshed request").into_data();
+                if request_method(&message) == "FinishSession" {
+                    break;
+                }
+            }
+            let final_result = r#"{"extra":{"packet_number":1},"results":[{"text":"刷新成功","is_interim":false,"is_vad_finished":true}]}"#;
+            second
+                .send(tungstenite::Message::Binary(
+                    response("request-refresh", "Result", Some(final_result)).into(),
+                ))
+                .expect("refresh final");
+            second
+                .send(tungstenite::Message::Binary(
+                    response("request-refresh", "SessionFinished", None).into(),
+                ))
+                .expect("refresh finished");
+        });
+        let path = temp_pcm(&[1_u8; PCM_FRAME_BYTES]);
+        let config = DoubaoRunConfig {
+            websocket: WebSocketSpec {
+                endpoint: format!("ws://{address}/refresh"),
+                headers: vec![("User-Agent".to_owned(), "fixture".to_owned())],
+                connect_timeout: Duration::from_secs(1),
+                poll_interval: Duration::from_millis(1),
+            },
+            request_id: "request-refresh".to_owned(),
+            session_json: br#"{"audio_info":{}}"#.to_vec(),
+            phase_timeout: Duration::from_secs(1),
+            total_timeout: Duration::from_secs(3),
+            frame_interval: Duration::ZERO,
+        };
+        let initial = SecretString::try_new("expired-token".to_owned()).expect("initial token");
+        let mut refreshes = 0_u32;
+        let transcription = transcribe_pcm_with_token_refresh(
+            &config,
+            &initial,
+            &path,
+            &CancellationToken::new(),
+            |_| {
+                refreshes += 1;
+                SecretString::try_new("refreshed-token".to_owned())
+            },
+        )
+        .expect("refreshed recognition");
+        assert_eq!(refreshes, 1);
+        assert_eq!(transcription.text, "刷新成功");
+        server.join().expect("refresh server");
         fs::remove_file(path).expect("remove PCM fixture");
     }
 }

@@ -20,10 +20,12 @@ cancellable TCP/handshake phases, binary/control-frame handling, automatic pong
 flushes, and deterministic loopback coverage. The single-worker runner now
 streams bounded PCM frames through Opus while concurrently polling interim/final
 events, enforces phase/total deadlines, and returns replay-safe failure evidence.
-Production endpoint/client-identity templates, one-time token refresh, daemon
-integration, and live verification remain gated by the distribution/licensing
-decision. The root `doubao-unofficial` feature remains disabled by default until
-those gates are satisfied.
+The runner now refreshes an authentication-failed StartTask token exactly once
+before any audio upload and never retries after ambiguous/accepted audio.
+Production endpoint/client-identity templates, managed bootstrap persistence,
+daemon integration, and live verification remain gated by the
+distribution/licensing decision. The root `doubao-unofficial` feature remains
+disabled by default until those gates are satisfied.
 
 ## Phase 0: decisions and spikes
 

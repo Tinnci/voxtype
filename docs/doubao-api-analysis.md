@@ -228,8 +228,10 @@ frames. Only VAD/text/final evidence—not a packet number alone—advances it t
   payloads from errors.
 
 The single-attempt runner and its loopback full-session fixture are implemented.
-The one-time StartTask authentication refresh orchestrator remains the next
-provider-layer increment.
+`StartTask` token/authentication failures are classified without exposing the
+provider status text. The retry wrapper refreshes exactly once only while audio
+acceptance remains `NotAccepted`; every other failure and the second attempt are
+returned directly. A two-connection loopback test proves the bounded retry.
 
 ## Implementation boundary for VoxType
 
