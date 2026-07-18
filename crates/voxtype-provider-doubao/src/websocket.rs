@@ -204,6 +204,9 @@ pub fn connect_websocket(
     if cancellation.is_cancelled() {
         return Err(cancelled());
     }
+    if uri.scheme_str() == Some("wss") {
+        ensure_rustls_provider()?;
+    }
     let deadline = Instant::now() + spec.connect_timeout;
     let host = uri.host().ok_or_else(|| {
         transport_error(
@@ -273,6 +276,22 @@ pub fn connect_websocket(
                 Err(map_handshake_error(error))
             }
         }
+    }
+}
+
+fn ensure_rustls_provider() -> Result<(), WebSocketTransportError> {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+    if rustls::crypto::CryptoProvider::get_default().is_some() {
+        Ok(())
+    } else {
+        Err(transport_error(
+            ErrorCategory::Internal,
+            false,
+            "doubao.websocket_crypto_provider_unavailable",
+            "Could not initialize the Doubao TLS crypto provider",
+        ))
     }
 }
 
@@ -652,6 +671,12 @@ mod tests {
                 .code(),
             "doubao.websocket_invalid_header"
         );
+    }
+
+    #[test]
+    fn installs_an_explicit_rustls_crypto_provider() {
+        ensure_rustls_provider().expect("rustls crypto provider");
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }
 
     #[test]
