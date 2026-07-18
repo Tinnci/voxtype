@@ -90,6 +90,8 @@ last-frame marker + FinishSession -> SessionFinished
 - Query: application version, `cdid`, display/device metadata, locale, OS, and
   network access fields. In the audited reference revision, `clientudid` and
   `openudid` occur in the JSON header rather than as query fields.
+- `_rticket` is generated afresh for every request as Unix epoch milliseconds;
+  callers cannot supply or override this reserved query key.
 - JSON body: `magic_tag`, a detailed `header`, and millisecond generation time.
 - Required response values: positive `device_id`; `install_id` is also stored.
 
@@ -103,6 +105,8 @@ Generated local identifiers include UUID-based `cdid`, `clientudid`, and a
 - Content body observed: `body=null`.
 - Header observed: uppercase MD5 of the exact body in `x-ss-stub`.
 - Query includes the registered `device_id` and common client metadata.
+- `_rticket` is generated afresh for every request as Unix epoch milliseconds;
+  neither `_rticket` nor `device_id` may be overridden by common metadata.
 - Token response path observed: `data.settings.asr_config.app_key`.
 
 The MD5 value here appears to be a request compatibility field, not a password

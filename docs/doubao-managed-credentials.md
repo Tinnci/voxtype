@@ -35,6 +35,8 @@ Security properties:
 
 - the bundle never belongs in TOML, command arguments, D-Bus state, logs, or
   diagnostics;
+- `_rticket` is not stored in the bundle; VoxType generates the reserved Unix
+  epoch millisecond value independently for every registration/settings call;
 - `device_id`, `install_id`, `cdid`, WebSocket query values, and headers are
   treated as persistent pseudonymous credentials;
 - the short-lived ASR token is fetched from the settings endpoint for each

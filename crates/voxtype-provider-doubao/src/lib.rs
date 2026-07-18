@@ -14,6 +14,7 @@ pub mod websocket;
 use serde_json::Value;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::time::{SystemTime, UNIX_EPOCH};
 use voxtype_core::{ErrorCategory, VoxError};
 use voxtype_provider_common::{
     CancellationToken, DEFAULT_MAX_RESPONSE_BYTES, SecretString, escape_curl_config,
@@ -193,7 +194,13 @@ pub fn register_device_http(
     cancellation: &CancellationToken,
 ) -> Result<RegisteredDevice, VoxError> {
     validate_bootstrap_config(config, context)?;
-    let url = bootstrap_url(&config.registration_endpoint, &context.common_query, &[])?;
+    ensure_not_cancelled(cancellation)?;
+    let ticket = request_ticket()?;
+    let url = bootstrap_url(
+        &config.registration_endpoint,
+        &context.common_query,
+        &[("_rticket", ticket.as_str())],
+    )?;
     let private_config = curl_post_config(
         &url,
         &context.user_agent,
@@ -233,10 +240,15 @@ pub fn fetch_settings_token_http(
 ) -> Result<SecretString, VoxError> {
     validate_bootstrap_config(config, context)?;
     validate_registered_device(registered)?;
+    ensure_not_cancelled(cancellation)?;
+    let ticket = request_ticket()?;
     let url = bootstrap_url(
         &config.settings_endpoint,
         &context.common_query,
-        &[("device_id", registered.device_id.as_str())],
+        &[
+            ("_rticket", ticket.as_str()),
+            ("device_id", registered.device_id.as_str()),
+        ],
     )?;
     let stub = x_ss_stub(SETTINGS_BODY);
     let private_config = curl_post_config(
@@ -312,7 +324,7 @@ fn validate_bootstrap_config(
         if !valid_query_key(key)
             || value.len() > 1024
             || value.bytes().any(|byte| byte.is_ascii_control())
-            || key == "device_id"
+            || matches!(key.as_str(), "_rticket" | "device_id")
         {
             return Err(bootstrap_error(
                 ErrorCategory::Configuration,
@@ -389,6 +401,24 @@ fn percent_encode(value: &str) -> String {
         }
     }
     encoded
+}
+
+fn request_ticket() -> Result<String, VoxError> {
+    request_ticket_at(SystemTime::now())
+}
+
+fn request_ticket_at(now: SystemTime) -> Result<String, VoxError> {
+    let millis = now
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| {
+            bootstrap_error(
+                ErrorCategory::Internal,
+                "doubao.system_clock_invalid",
+                "System clock is before the Unix epoch",
+            )
+        })?
+        .as_millis();
+    Ok(millis.to_string())
 }
 
 fn curl_post_config(
@@ -852,6 +882,32 @@ mod tests {
         (format!("http://{address}{path}"), receiver)
     }
 
+    fn assert_request_ticket(request: &str, prefix: &str, suffix: &str) {
+        let request_target = request
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("POST "))
+            .and_then(|line| line.strip_suffix(" HTTP/1.1"))
+            .expect("valid HTTP request line");
+        let ticket = request_target
+            .strip_prefix(prefix)
+            .and_then(|target| target.strip_suffix(suffix))
+            .expect("request target containing the dynamic ticket");
+        assert!(!ticket.is_empty());
+        assert!(ticket.bytes().all(|byte| byte.is_ascii_digit()));
+        ticket.parse::<u128>().expect("numeric request ticket");
+    }
+
+    #[test]
+    fn request_ticket_is_unix_epoch_milliseconds() {
+        let now = UNIX_EPOCH + Duration::from_millis(1_234_567);
+        assert_eq!(request_ticket_at(now).expect("request ticket"), "1234567");
+
+        let error = request_ticket_at(UNIX_EPOCH - Duration::from_millis(1))
+            .expect_err("pre-epoch clock must fail");
+        assert_eq!(error.code(), "doubao.system_clock_invalid");
+    }
+
     #[test]
     fn bootstrap_parses_ids_and_zeroizing_token() {
         let registered =
@@ -946,9 +1002,10 @@ mod tests {
                 .expect("registration request"),
         )
         .expect("registration request UTF-8");
-        assert!(
-            registration
-                .starts_with("POST /register?aid=fixture&locale=zh%20CN&cdid=cdid-secret HTTP/1.1")
+        assert_request_ticket(
+            &registration,
+            "/register?aid=fixture&locale=zh%20CN&cdid=cdid-secret&_rticket=",
+            "",
         );
         assert!(!registration.contains("client-secret"));
         assert!(!registration.contains("open-secret"));
@@ -961,9 +1018,11 @@ mod tests {
                 .expect("settings request"),
         )
         .expect("settings request UTF-8");
-        assert!(settings.starts_with(
-            "POST /settings?aid=fixture&locale=zh%20CN&cdid=cdid-secret&device_id=123456 HTTP/1.1"
-        ));
+        assert_request_ticket(
+            &settings,
+            "/settings?aid=fixture&locale=zh%20CN&cdid=cdid-secret&_rticket=",
+            "&device_id=123456",
+        );
         assert!(settings.contains("x-ss-stub: 46C03B52742B3F2615A3ABDF1636B754"));
         assert!(settings.ends_with("\r\n\r\nbody=null"));
     }
@@ -977,16 +1036,23 @@ mod tests {
         };
         let mut context = BootstrapRequestContext {
             user_agent: "fixture".to_owned(),
-            common_query: vec![("device_id".to_owned(), "override".to_owned())],
+            common_query: Vec::new(),
         };
         let registered = RegisteredDevice {
             device_id: "123".to_owned(),
             install_id: String::new(),
         };
-        let error =
-            fetch_settings_token_http(&config, &context, &registered, &CancellationToken::new())
-                .expect_err("reserved metadata must fail");
-        assert_eq!(error.code(), "doubao.invalid_query_metadata");
+        for reserved_key in ["device_id", "_rticket"] {
+            context.common_query = vec![(reserved_key.to_owned(), "override".to_owned())];
+            let error = fetch_settings_token_http(
+                &config,
+                &context,
+                &registered,
+                &CancellationToken::new(),
+            )
+            .expect_err("reserved metadata must fail");
+            assert_eq!(error.code(), "doubao.invalid_query_metadata");
+        }
 
         context.common_query.clear();
         let cancellation = CancellationToken::new();
