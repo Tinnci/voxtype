@@ -382,10 +382,7 @@ impl DoubaoSessionProtocol {
                     "Doubao rejected the StartTask credential",
                 ));
             }
-            return Err(self.fail(
-                "doubao.remote_status_failed",
-                "Doubao returned a non-zero protocol status",
-            ));
+            return Err(self.fail_remote_status(response.status_code));
         }
         match response.message_type.as_str() {
             "TaskFailed"
@@ -545,6 +542,25 @@ impl DoubaoSessionProtocol {
         }
         SessionProtocolError::with_category(category, code, message)
     }
+
+    fn fail_remote_status(&mut self, status_code: u64) -> SessionProtocolError {
+        let code = match self.phase {
+            SessionPhase::TaskStarting => "doubao.start_task_status_failed",
+            SessionPhase::SessionStarting => "doubao.start_session_status_failed",
+            SessionPhase::Streaming => "doubao.streaming_status_failed",
+            SessionPhase::Finishing => "doubao.finish_session_status_failed",
+            _ => "doubao.remote_status_failed",
+        };
+        if self.phase != SessionPhase::Cancelled {
+            self.phase = SessionPhase::Failed;
+        }
+        SessionProtocolError::with_status(
+            ErrorCategory::Protocol,
+            code,
+            "Doubao returned a non-zero protocol status",
+            status_code,
+        )
+    }
 }
 
 fn auth_like_response(response: &crate::ResponseEnvelope) -> bool {
@@ -582,6 +598,7 @@ pub struct SessionProtocolError {
     category: ErrorCategory,
     code: &'static str,
     message: &'static str,
+    status_code: Option<u64>,
 }
 
 impl SessionProtocolError {
@@ -598,6 +615,21 @@ impl SessionProtocolError {
             category,
             code,
             message,
+            status_code: None,
+        }
+    }
+
+    const fn with_status(
+        category: ErrorCategory,
+        code: &'static str,
+        message: &'static str,
+        status_code: u64,
+    ) -> Self {
+        Self {
+            category,
+            code,
+            message,
+            status_code: Some(status_code),
         }
     }
 
@@ -609,6 +641,11 @@ impl SessionProtocolError {
     #[must_use]
     pub const fn code(self) -> &'static str {
         self.code
+    }
+
+    #[must_use]
+    pub const fn status_code(self) -> Option<u64> {
+        self.status_code
     }
 }
 
@@ -843,7 +880,8 @@ mod tests {
         let error = protocol
             .handle_binary(&failed)
             .expect_err("non-zero status must fail");
-        assert_eq!(error.code(), "doubao.remote_status_failed");
+        assert_eq!(error.code(), "doubao.streaming_status_failed");
+        assert_eq!(error.status_code(), Some(17));
         assert_eq!(protocol.phase(), SessionPhase::Failed);
 
         let (mut protocol, _) = ready_protocol();

@@ -543,12 +543,11 @@ fn unix_millis() -> Result<u64, VoxError> {
 }
 
 fn protocol_vox_error(error: SessionProtocolError) -> VoxError {
-    vox_error(
-        error.category(),
-        error.code(),
-        "Doubao session protocol validation failed",
-        false,
-    )
+    let message = error.status_code().map_or_else(
+        || "Doubao session protocol validation failed".to_owned(),
+        |status| format!("Doubao session protocol validation failed with status {status}"),
+    );
+    vox_error(error.category(), error.code(), message, false)
 }
 
 fn connection_closed() -> VoxError {
@@ -563,7 +562,7 @@ fn connection_closed() -> VoxError {
 fn vox_error(
     category: ErrorCategory,
     code: &'static str,
-    message: &'static str,
+    message: impl Into<String>,
     retryable: bool,
 ) -> VoxError {
     VoxError::new(category, code, message).with_retryable(retryable)
