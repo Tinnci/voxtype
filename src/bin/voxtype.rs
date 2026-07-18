@@ -6,6 +6,12 @@ use voxtype::client::Client;
 use voxtype::config::{Config, ProviderConfig, config_path, store_secret};
 use voxtype::fcitx::FcitxBridge;
 use voxtype::vad::{self, VadConfig};
+#[cfg(feature = "doubao-unofficial")]
+use voxtype_provider_common::CancellationToken;
+#[cfg(feature = "doubao-unofficial")]
+use voxtype_provider_doubao::managed::{
+    ManagedCredentialBundle, ManagedDoubaoConfig, transcribe_managed_pcm,
+};
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::OwnedObjectPath;
 
@@ -123,7 +129,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         );
     }
     if command == "doctor" {
-        return doctor_command(arguments.next().as_deref());
+        return doctor_command(arguments);
     }
 
     let connection = Connection::session()?;
@@ -219,7 +225,7 @@ fn print_session_result(client: &Client<'_>, session: &str) -> Result<(), Box<dy
 
 fn print_help() {
     println!(
-        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype usage\n  voxtype result SESSION\n  voxtype grammar context|last|show|history|clear\n  voxtype fcitx-focus\n  voxtype fcitx-context\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype stop --wait [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio|shortcut|insertion|provider|all]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
+        "VoxType CLI\n\nUsage:\n  voxtype status\n  voxtype providers\n  voxtype usage\n  voxtype result SESSION\n  voxtype grammar context|last|show|history|clear\n  voxtype fcitx-focus\n  voxtype fcitx-context\n  voxtype fcitx-insert-test TEXT\n  voxtype start [PROFILE]\n  voxtype stop [SESSION]\n  voxtype stop --wait [SESSION]\n  voxtype toggle [PROFILE]\n  voxtype cancel [SESSION]\n  voxtype reset\n  voxtype reload\n  voxtype doctor [audio|shortcut|insertion|provider|provider-live PROFILE [SECONDS]|all]\n  voxtype insert-test TEXT\n  voxtype config path|validate\n  voxtype secret set NAME"
     );
 }
 
@@ -239,8 +245,9 @@ fn grammar_command(client: &Client<'_>, action: &str) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-fn doctor_command(section: Option<&str>) -> Result<(), Box<dyn Error>> {
-    match section {
+fn doctor_command(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let section = arguments.next();
+    match section.as_deref() {
         Some("audio") => return doctor_audio(),
         Some("shortcut") => {
             print_shortcut_diagnostics();
@@ -256,9 +263,15 @@ fn doctor_command(section: Option<&str>) -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
         Some("provider") => return doctor_provider(),
+        Some("provider-live") => {
+            return doctor_provider_live(
+                arguments.next().as_deref().unwrap_or(""),
+                arguments.next().as_deref(),
+            );
+        }
         Some("all") | None => {}
         Some(_) => {
-            return Err("usage: voxtype doctor [audio|shortcut|insertion|provider|all]".into());
+            return Err("usage: voxtype doctor [audio|shortcut|insertion|provider|provider-live PROFILE [SECONDS]|all]".into());
         }
     }
     let config = Config::load_or_create()?;
@@ -330,6 +343,83 @@ fn doctor_command(section: Option<&str>) -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "doubao-unofficial")]
+fn doctor_provider_live(profile_name: &str, seconds: Option<&str>) -> Result<(), Box<dyn Error>> {
+    require_idle_daemon("live provider doctor")?;
+    if profile_name.is_empty() {
+        return Err("usage: voxtype doctor provider-live PROFILE [SECONDS]".into());
+    }
+    let seconds = seconds.unwrap_or("6").parse::<u64>()?;
+    if !(1..=30).contains(&seconds) {
+        return Err("live provider doctor duration must be between 1 and 30 seconds".into());
+    }
+
+    let config = Config::load_or_create()?;
+    let profile = config
+        .profiles
+        .get(profile_name)
+        .ok_or("requested live provider profile does not exist")?;
+    let provider = config
+        .providers
+        .get(&profile.primary)
+        .ok_or("live provider profile references an unknown provider")?;
+    let ProviderConfig::DoubaoUnofficial {
+        secret,
+        phase_timeout_seconds,
+        total_timeout_seconds,
+        frame_interval_millis,
+    } = provider
+    else {
+        return Err("live provider doctor currently supports Doubao profiles only".into());
+    };
+    let credentials = ManagedCredentialBundle::parse(&voxtype::config::lookup_secret(secret)?)?;
+    let provider_config = ManagedDoubaoConfig {
+        credentials,
+        phase_timeout: std::time::Duration::from_secs(*phase_timeout_seconds),
+        total_timeout: std::time::Duration::from_secs(*total_timeout_seconds),
+        frame_interval: std::time::Duration::from_millis(*frame_interval_millis),
+    };
+
+    println!("provider.live.capture=started seconds={seconds}");
+    let recording = Recording::start_with_device(Some(config.audio.device.as_str()))?;
+    std::thread::sleep(std::time::Duration::from_secs(seconds));
+    let recording = recording.stop()?;
+    let vad = vad::analyze_file(
+        &recording.path,
+        VadConfig {
+            rms_threshold: config.audio.vad_rms_threshold,
+            minimum_voiced_frames: config.audio.vad_minimum_voiced_frames,
+        },
+    )?;
+    if !vad.speech_detected {
+        std::fs::remove_file(&recording.path)?;
+        return Err("live provider doctor did not detect speech".into());
+    }
+    let trimmed_bytes = vad::trim_file(&recording.path, &vad)?;
+    let transcription =
+        transcribe_managed_pcm(&provider_config, &recording.path, &CancellationToken::new())
+            .map_err(voxtype_core::ProviderAttemptFailure::into_error);
+    let cleanup = std::fs::remove_file(&recording.path);
+    let transcription = transcription?;
+    cleanup?;
+    println!(
+        "provider.live=ok provider={} captured_ms={} sent_audio_ms={} partials={} provider_vad_started={} provider_vad_finished={} transcript={}",
+        profile.primary,
+        trimmed_bytes.saturating_mul(1_000) / 32_000,
+        transcription.sent_audio_millis,
+        transcription.partial_results,
+        transcription.provider_vad_started,
+        transcription.provider_vad_finished,
+        serde_json::to_string(&transcription.text)?,
+    );
+    Ok(())
+}
+
+#[cfg(not(feature = "doubao-unofficial"))]
+fn doctor_provider_live(_profile_name: &str, _seconds: Option<&str>) -> Result<(), Box<dyn Error>> {
+    Err("live Doubao provider doctor requires the doubao-unofficial build feature".into())
 }
 
 fn doctor_provider() -> Result<(), Box<dyn Error>> {

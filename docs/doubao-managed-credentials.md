@@ -31,6 +31,18 @@ Store the compact JSON either through the feature-enabled settings panel or:
 voxtype secret set doubao-managed-bundle
 ```
 
+After configuring a profile that references the provider, run an explicit live
+smoke test that captures from the configured microphone without arming Fcitx or
+inserting text into the focused application:
+
+```text
+voxtype doctor provider-live doubao 6
+```
+
+The command requires an idle daemon, applies the normal local VAD trim, deletes
+the temporary PCM file, and reports the final transcript and bounded transport
+metrics. It is opt-in and is never run by normal tests or CI.
+
 Security properties:
 
 - the bundle never belongs in TOML, command arguments, D-Bus state, logs, or
