@@ -17,7 +17,7 @@ use std::fmt::{self, Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
 use voxtype_core::{ErrorCategory, VoxError};
 use voxtype_provider_common::{
-    CancellationToken, DEFAULT_MAX_RESPONSE_BYTES, SecretString, escape_curl_config,
+    CancellationToken, CurlFailure, DEFAULT_MAX_RESPONSE_BYTES, SecretString, escape_curl_config,
     execute_curl_cancellable,
 };
 
@@ -215,7 +215,13 @@ pub fn register_device_http(
         DEFAULT_MAX_RESPONSE_BYTES,
         cancellation,
     )
-    .map_err(|error| error.into_vox_error("doubao.registration_http_failed"))?;
+    .map_err(|error| {
+        redacted_bootstrap_transport_error(
+            &error,
+            "doubao.registration_http_failed",
+            "Doubao device registration request failed",
+        )
+    })?;
     ensure_not_cancelled(cancellation)?;
     parse_device_registration(&response.body).map_err(|_| {
         bootstrap_error(
@@ -265,7 +271,13 @@ pub fn fetch_settings_token_http(
         DEFAULT_MAX_RESPONSE_BYTES,
         cancellation,
     )
-    .map_err(|error| error.into_vox_error("doubao.settings_http_failed"))?;
+    .map_err(|error| {
+        redacted_bootstrap_transport_error(
+            &error,
+            "doubao.settings_http_failed",
+            "Doubao settings request failed",
+        )
+    })?;
     ensure_not_cancelled(cancellation)?;
     parse_settings_token(&response.body).map_err(|_| {
         bootstrap_error(
@@ -451,6 +463,14 @@ fn curl_post_config(
 
 fn bootstrap_error(category: ErrorCategory, code: &'static str, message: &'static str) -> VoxError {
     VoxError::new(category, code, message)
+}
+
+fn redacted_bootstrap_transport_error(
+    error: &CurlFailure,
+    code: &'static str,
+    message: &'static str,
+) -> VoxError {
+    VoxError::new(error.category(), code, message).with_retryable(error.is_retryable())
 }
 
 fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<(), VoxError> {
@@ -1061,6 +1081,32 @@ mod tests {
             .expect_err("pre-cancelled bootstrap must fail");
         assert_eq!(error.category(), ErrorCategory::Cancelled);
         assert!(!error.to_string().contains("123"));
+    }
+
+    #[test]
+    fn bootstrap_transport_errors_never_expose_query_metadata() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve loopback address");
+        let address = listener.local_addr().expect("loopback address");
+        drop(listener);
+        let config = BootstrapHttpConfig {
+            registration_endpoint: format!("http://{address}/register"),
+            settings_endpoint: format!("http://{address}/settings"),
+            timeout_seconds: 1,
+        };
+        let context = BootstrapRequestContext {
+            user_agent: "fixture".to_owned(),
+            common_query: vec![("cdid".to_owned(), "persistent-sensitive-id".to_owned())],
+        };
+        let document = RegistrationDocument::from_json(&serde_json::json!({"fixture": true}))
+            .expect("registration document");
+
+        let error = register_device_http(&config, &context, &document, &CancellationToken::new())
+            .expect_err("closed loopback address must fail");
+        assert_eq!(error.code(), "doubao.registration_http_failed");
+        assert_eq!(error.message(), "Doubao device registration request failed");
+        assert!(!error.to_string().contains("persistent-sensitive-id"));
+        assert!(!format!("{error:?}").contains("persistent-sensitive-id"));
+        assert!(!error.to_string().contains("_rticket"));
     }
 
     #[test]
