@@ -593,7 +593,8 @@ fn identifier_at(value: &Value, path: &[&str]) -> Option<String> {
 }
 
 /// Encodes the observed request envelope without depending on generated
-/// protobuf code. Empty JSON/audio fields are omitted.
+/// protobuf code. The provider expects every known field, including explicit
+/// zero-length token/payload/audio fields and an unspecified frame-state zero.
 #[must_use]
 pub fn encode_request(
     token: &str,
@@ -611,21 +612,13 @@ pub fn encode_request(
         .saturating_add(request_id.len())
         .saturating_add(32);
     let mut output = Vec::with_capacity(capacity);
-    if !token.is_empty() {
-        write_bytes(&mut output, 2, token.as_bytes());
-    }
+    write_bytes(&mut output, 2, token.as_bytes());
     write_bytes(&mut output, 3, b"ASR");
     write_bytes(&mut output, 5, method.as_bytes());
-    if !json_payload.is_empty() {
-        write_bytes(&mut output, 6, json_payload);
-    }
-    if !audio.is_empty() {
-        write_bytes(&mut output, 7, audio);
-    }
+    write_bytes(&mut output, 6, json_payload);
+    write_bytes(&mut output, 7, audio);
     write_bytes(&mut output, 8, request_id.as_bytes());
-    if let Some(state) = frame_state {
-        write_varint_field(&mut output, 9, state as u64);
-    }
+    write_varint_field(&mut output, 9, frame_state.map_or(0, |state| state as u64));
     output
 }
 
@@ -1115,10 +1108,15 @@ mod tests {
         assert_eq!(
             encoded,
             [
-                0x12, 0x01, b't', 0x1a, 0x03, b'A', b'S', b'R', 0x2a, 0x01, b'M', 0x42, 0x01, b'r',
-                0x48, 0x01,
+                0x12, 0x01, b't', 0x1a, 0x03, b'A', b'S', b'R', 0x2a, 0x01, b'M', 0x32, 0x00, 0x3a,
+                0x00, 0x42, 0x01, b'r', 0x48, 0x01,
             ]
         );
+
+        let start_task = encode_request("t", "StartTask", &[], &[], "r", None);
+        assert!(start_task.windows(2).any(|field| field == [0x32, 0x00]));
+        assert!(start_task.windows(2).any(|field| field == [0x3a, 0x00]));
+        assert!(start_task.ends_with(&[0x48, 0x00]));
     }
 
     #[test]

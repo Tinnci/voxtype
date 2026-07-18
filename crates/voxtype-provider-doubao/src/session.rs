@@ -694,7 +694,7 @@ mod tests {
             protocol.audio_acceptance(),
             AudioAcceptance::PossiblyAccepted
         );
-        assert!(!first.windows(2).any(|part| part == [0x12, 0x00]));
+        assert!(first.windows(2).any(|part| part == [0x12, 0x00]));
         protocol.finish_audio(1_020).expect("last marker");
         protocol.finish_session(&token).expect("FinishSession");
 
