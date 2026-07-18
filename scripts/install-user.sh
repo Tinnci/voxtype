@@ -26,7 +26,11 @@ for command in curl secret-tool wl-copy wl-paste ydotool; do
 done
 
 cd "$repo_root"
-cargo build --release --locked --workspace --bins
+build_args=(build --release --locked --workspace --bins)
+if [[ -n "${VOXTYPE_FEATURES:-}" ]]; then
+  build_args+=(--features "$VOXTYPE_FEATURES")
+fi
+cargo "${build_args[@]}"
 
 install -Dm755 target/release/voxtype "$bindir/voxtype"
 install -Dm755 target/release/voxtyped "$bindir/voxtyped"

@@ -179,6 +179,13 @@ cargo build --release
 stat -c '%s' target/release/voxtype
 ```
 
+The user installer accepts an explicit feature list without changing normal
+distribution defaults:
+
+```bash
+VOXTYPE_FEATURES=doubao-unofficial ./scripts/install-user.sh
+```
+
 Optional developer accelerators:
 
 - `sccache` for repeated clean builds and CI;

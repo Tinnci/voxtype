@@ -44,6 +44,12 @@ Build and install user-owned components:
 ./scripts/install-user.sh
 ```
 
+The unofficial Doubao adapter remains opt-in and is installed explicitly:
+
+```bash
+VOXTYPE_FEATURES=doubao-unofficial ./scripts/install-user.sh
+```
+
 The native Fcitx bridge is a small C++ addon and must be installed separately
 because Fcitx loads addons from system directories:
 
@@ -118,6 +124,9 @@ Run the same release installation path used for local integration testing:
 ```bash
 ./scripts/install-user.sh
 ```
+
+Set `VOXTYPE_FEATURES=doubao-unofficial` when testing the separately gated
+Doubao integration; the normal installation intentionally keeps it disabled.
 
 ## Reference-code policy
 
