@@ -36,10 +36,10 @@ plain-WS rejection, and cancellation during a stalled handshake.
 
 The crate deliberately contains no built-in production endpoint or Android
 identity template. The caller must supply both under an explicit distribution
-policy. Full PCM/session orchestration, daemon wiring, and live opt-in
-verification remain. DNS still uses the standard resolver and is the only
-connection operation that cannot be interrupted by the current cancellation
-token.
+policy. The production identity profile, one-time token refresh, daemon wiring,
+and live opt-in verification remain. DNS still uses the standard resolver and
+is the only connection operation that cannot be interrupted by the current
+cancellation token.
 The root binary exposes a default-off `doubao-unofficial` build feature so this
 protocol is not linked into normal distribution builds merely because the
 workspace tests its isolated crate.
@@ -153,6 +153,14 @@ while the real provider still sends standards-compliant raw Opus packets. Codec
 tests decode emitted packets back to exactly 320 samples instead of comparing
 compressed output that can change between compatible libopus versions.
 
+`runner.rs` now owns the full bounded attempt: it validates and opens the PCM
+file before transport, retains one 640-byte frame at a time, encodes one Opus
+packet, drives one nonblocking WebSocket, and polls a fixed number of inbound
+events between sends. It applies separate phase and total deadlines, checks
+cancellation throughout, preserves partial/VAD metrics, pads an even partial
+tail, and reports accurate replay evidence on failure. No internal sender or
+reader thread is created.
+
 ## Audio contract
 
 - Capture/conversion input: mono signed 16-bit PCM at 16 kHz.
@@ -218,6 +226,10 @@ frames. Only VAD/text/final evidence—not a packet number alone—advances it t
   provider behavior is proven idempotent.
 - Redact token, device identifiers, query strings, headers, and raw provider
   payloads from errors.
+
+The single-attempt runner and its loopback full-session fixture are implemented.
+The one-time StartTask authentication refresh orchestrator remains the next
+provider-layer increment.
 
 ## Implementation boundary for VoxType
 

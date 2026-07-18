@@ -17,11 +17,13 @@ lifecycle transitions, mismatched request IDs, non-zero status, stale packets,
 empty finals, and late results after cancellation while preserving precise audio
 acceptance evidence. The nonblocking WebSocket/TLS layer now has bounded buffers,
 cancellable TCP/handshake phases, binary/control-frame handling, automatic pong
-flushes, and deterministic loopback coverage. Production endpoint/client-identity
-templates, PCM/session orchestration, daemon integration, and live verification
-remain gated by the distribution/licensing decision. The root
-`doubao-unofficial` feature remains disabled by default until those gates are
-satisfied.
+flushes, and deterministic loopback coverage. The single-worker runner now
+streams bounded PCM frames through Opus while concurrently polling interim/final
+events, enforces phase/total deadlines, and returns replay-safe failure evidence.
+Production endpoint/client-identity templates, one-time token refresh, daemon
+integration, and live verification remain gated by the distribution/licensing
+decision. The root `doubao-unofficial` feature remains disabled by default until
+those gates are satisfied.
 
 ## Phase 0: decisions and spikes
 

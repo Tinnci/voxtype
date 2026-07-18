@@ -6,6 +6,7 @@
 //! event primitives for a future session transport.
 
 pub mod opus_codec;
+pub mod runner;
 pub mod session;
 pub mod websocket;
 
