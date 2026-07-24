@@ -12,6 +12,8 @@ use std::sync::{
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use voxtype_app::{CaptureAdapter, CaptureFrameMetrics, CaptureSession, CapturedAudio};
+use voxtype_core::{ErrorCategory, VoxError};
 
 #[derive(Debug)]
 pub struct Recording {
@@ -20,6 +22,7 @@ pub struct Recording {
     backend: &'static str,
     reader: Option<JoinHandle<io::Result<u64>>>,
     frames: Mutex<Receiver<AudioFrameMetrics>>,
+    preserve_file_on_drop: bool,
 }
 
 /// Bounded, content-free metrics for one 20 ms PCM frame.
@@ -40,6 +43,66 @@ pub struct RecordingResult {
     pub backend: &'static str,
 }
 
+/// Production capture adapter composed into the daemon.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProcessCaptureAdapter;
+
+impl CaptureAdapter for ProcessCaptureAdapter {
+    fn start(&self, device: Option<&str>) -> Result<Box<dyn CaptureSession>, VoxError> {
+        Recording::start_with_device(device)
+            .map(|recording| Box::new(recording) as Box<dyn CaptureSession>)
+            .map_err(|error| {
+                VoxError::new(
+                    ErrorCategory::Unavailable,
+                    "audio.start_failed",
+                    error.to_string(),
+                )
+            })
+    }
+}
+
+impl CaptureSession for Recording {
+    fn stop(self: Box<Self>) -> Result<CapturedAudio, VoxError> {
+        Recording::stop(*self)
+            .map(|result| CapturedAudio {
+                path: result.path,
+                bytes: result.bytes,
+                duration_millis: result.duration_millis,
+                backend: result.backend,
+            })
+            .map_err(|error| {
+                VoxError::new(
+                    ErrorCategory::Unavailable,
+                    "audio.stop_failed",
+                    error.to_string(),
+                )
+            })
+    }
+
+    fn cancel(self: Box<Self>) {
+        Recording::cancel(*self);
+    }
+
+    fn drain_metrics(&mut self) -> Vec<CaptureFrameMetrics> {
+        self.drain_frames()
+            .into_iter()
+            .map(CaptureFrameMetrics::from)
+            .collect()
+    }
+}
+
+impl From<AudioFrameMetrics> for CaptureFrameMetrics {
+    fn from(value: AudioFrameMetrics) -> Self {
+        Self {
+            frame: value.frame,
+            rms: value.rms,
+            peak: value.peak,
+            clipped_samples: value.clipped_samples,
+            samples: value.samples,
+        }
+    }
+}
+
 impl Recording {
     /// Starts mono 16 kHz signed 16-bit capture from the default source.
     ///
@@ -58,17 +121,20 @@ impl Recording {
     /// Returns an I/O error if the runtime recording file or capture process
     /// cannot be created.
     pub fn start_with_device(device: Option<&str>) -> io::Result<Self> {
-        let path = recording_path()?;
-        let mut output = File::create(&path)?;
+        let pending_path = RecordingPathGuard::new(recording_path()?);
+        let mut output = File::create(pending_path.path())?;
         let (backend, mut command) = capture_command(device);
         let (frame_sender, frame_receiver) = sync_channel(64);
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let mut child = CaptureChildGuard::new(
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()?,
+        );
 
         let mut source = child
+            .child_mut()
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("parec stdout is unavailable"))?;
@@ -99,7 +165,7 @@ impl Recording {
             })?;
 
         thread::sleep(Duration::from_millis(50));
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child.child_mut().try_wait()? {
             let _reader_result = reader.join();
             return Err(io::Error::other(format!(
                 "{backend} exited during startup with {status}"
@@ -107,11 +173,12 @@ impl Recording {
         }
 
         Ok(Self {
-            child,
-            path,
+            child: child.take(),
+            path: pending_path.retain(),
             backend,
             reader: Some(reader),
             frames: Mutex::new(frame_receiver),
+            preserve_file_on_drop: false,
         })
     }
 
@@ -134,6 +201,7 @@ impl Recording {
         self.join_reader()?;
         let bytes = fs::metadata(&self.path)?.len();
         let duration_millis = bytes.saturating_mul(1_000) / 32_000;
+        self.preserve_file_on_drop = true;
         Ok(RecordingResult {
             path: self.path.clone(),
             bytes,
@@ -177,6 +245,9 @@ impl Drop for Recording {
             let _result = self.child.wait();
         }
         let _result = self.join_reader();
+        if !self.preserve_file_on_drop {
+            let _result = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -202,6 +273,65 @@ fn recording_path() -> io::Result<PathBuf> {
         .unwrap_or_default()
         .as_millis();
     Ok(directory.join(format!("recording-{}-{timestamp}.pcm", std::process::id())))
+}
+
+struct RecordingPathGuard {
+    path: PathBuf,
+    retained: bool,
+}
+
+impl RecordingPathGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            retained: false,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn retain(mut self) -> PathBuf {
+        self.retained = true;
+        self.path.clone()
+    }
+}
+
+impl Drop for RecordingPathGuard {
+    fn drop(&mut self) {
+        if !self.retained {
+            let _result = fs::remove_file(&self.path);
+        }
+    }
+}
+
+struct CaptureChildGuard(Option<Child>);
+
+impl CaptureChildGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("capture child is present")
+    }
+
+    fn take(mut self) -> Child {
+        self.0.take().expect("capture child is present")
+    }
+}
+
+impl Drop for CaptureChildGuard {
+    fn drop(&mut self) {
+        let Some(child) = self.0.as_mut() else {
+            return;
+        };
+        if child.try_wait().ok().flatten().is_none() {
+            let _result = child.kill();
+        }
+        let _result = child.wait();
+    }
 }
 
 fn capture_command(device: Option<&str>) -> (&'static str, Command) {
@@ -401,6 +531,32 @@ mod tests {
 
         assert!(!directory.join("recording-old.pcm").exists());
         assert!(directory.join("fcitx.sock").exists());
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn pending_recording_path_is_removed_unless_retained() {
+        let directory = std::env::temp_dir().join(format!(
+            "voxtype-recording-guard-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("create test directory");
+
+        let abandoned = directory.join("recording-abandoned.pcm");
+        fs::write(&abandoned, b"audio").expect("write abandoned recording");
+        drop(RecordingPathGuard::new(abandoned.clone()));
+        assert!(!abandoned.exists());
+
+        let retained = directory.join("recording-retained.pcm");
+        fs::write(&retained, b"audio").expect("write retained recording");
+        let retained_path = RecordingPathGuard::new(retained.clone()).retain();
+        assert_eq!(retained_path, retained);
+        assert!(retained.exists());
+
         fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

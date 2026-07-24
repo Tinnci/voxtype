@@ -1,6 +1,6 @@
-//! ASR provider contracts.
+//! Provider-neutral ASR types and attempt lifecycle evidence.
 
-use crate::{AudioChunk, AudioFormat, VoxError};
+use crate::{AudioFormat, VoxError};
 use std::fmt::{self, Display, Formatter};
 
 /// What is known about a provider receiving the current audio.
@@ -121,60 +121,6 @@ pub enum RecognitionEvent {
     Final { text: String, sequence: Option<u64> },
     SpeechEnded,
     Finished,
-}
-
-pub trait AudioSink: Send {
-    /// Sends one provider-neutral audio chunk.
-    ///
-    /// # Errors
-    ///
-    /// Returns a normalized provider error if the chunk cannot be accepted.
-    fn send(&mut self, chunk: &AudioChunk) -> Result<(), VoxError>;
-
-    /// Marks the end of audio input.
-    ///
-    /// # Errors
-    ///
-    /// Returns a normalized provider error if finalization cannot be requested.
-    fn finish(&mut self) -> Result<(), VoxError>;
-}
-
-pub trait RecognitionEvents: Send {
-    /// Waits for the next normalized recognition event.
-    ///
-    /// # Errors
-    ///
-    /// Returns a normalized provider error on timeout, cancellation, transport,
-    /// or protocol failure.
-    fn next(&mut self) -> Result<RecognitionEvent, VoxError>;
-}
-
-pub trait RecognitionControl: Send + Sync {
-    /// Cancels the provider session.
-    ///
-    /// # Errors
-    ///
-    /// Returns a normalized provider error if cancellation cannot be delivered.
-    fn cancel(&self) -> Result<(), VoxError>;
-}
-
-pub struct ProviderConnection {
-    pub audio: Box<dyn AudioSink>,
-    pub events: Box<dyn RecognitionEvents>,
-    pub control: Box<dyn RecognitionControl>,
-}
-
-pub trait AsrProvider: Send + Sync {
-    fn id(&self) -> &ProviderId;
-    fn capabilities(&self) -> ProviderCapabilities;
-
-    /// Opens a recognition session.
-    ///
-    /// # Errors
-    ///
-    /// Returns a normalized configuration, credential, transport, or provider
-    /// availability error.
-    fn connect(&self, request: &RecognitionRequest) -> Result<ProviderConnection, VoxError>;
 }
 
 #[cfg(test)]

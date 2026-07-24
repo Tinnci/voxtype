@@ -196,7 +196,10 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
     use std::process::Command;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc::{Receiver, SyncSender, sync_channel},
+    };
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -311,7 +314,7 @@ mod tests {
 
     #[test]
     fn cancels_an_in_flight_request() {
-        let (address, server) = spawn_response(
+        let (address, accepted, server) = spawn_response_with_acceptance(
             200,
             Vec::new(),
             br#"{"text":"too late"}"#.to_vec(),
@@ -320,6 +323,9 @@ mod tests {
         let cancellation = CancellationToken::new();
         let trigger = cancellation.clone();
         let canceller = thread::spawn(move || {
+            accepted
+                .recv_timeout(Duration::from_secs(2))
+                .expect("provider request must reach the loopback server");
             thread::sleep(Duration::from_millis(50));
             trigger.cancel();
         });
@@ -434,10 +440,36 @@ mod tests {
         body: Vec<u8>,
         delay: Duration,
     ) -> (SocketAddr, thread::JoinHandle<Vec<u8>>) {
+        let (address, server) = spawn_response_inner(status, extra_headers, body, delay, None);
+        (address, server)
+    }
+
+    fn spawn_response_with_acceptance(
+        status: u16,
+        extra_headers: Vec<u8>,
+        body: Vec<u8>,
+        delay: Duration,
+    ) -> (SocketAddr, Receiver<()>, thread::JoinHandle<Vec<u8>>) {
+        let (accepted_sender, accepted_receiver) = sync_channel(1);
+        let (address, server) =
+            spawn_response_inner(status, extra_headers, body, delay, Some(accepted_sender));
+        (address, accepted_receiver, server)
+    }
+
+    fn spawn_response_inner(
+        status: u16,
+        extra_headers: Vec<u8>,
+        body: Vec<u8>,
+        delay: Duration,
+        accepted_sender: Option<SyncSender<()>>,
+    ) -> (SocketAddr, thread::JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
         let address = listener.local_addr().expect("listener address");
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("request connection");
+            if let Some(sender) = accepted_sender {
+                sender.send(()).expect("report accepted request");
+            }
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("read timeout");

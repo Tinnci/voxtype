@@ -5,14 +5,12 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
 use std::thread;
 use std::time::Duration;
 use voxtype_core::{AudioAcceptance, ErrorCategory, ProviderAttemptFailure, VoxError};
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+pub use voxtype_core::CancellationToken;
 
 /// Maximum provider response retained in memory.
 ///
@@ -25,26 +23,6 @@ const HTTP_STATUS_MARKER: &str = "VOXTYPE_HTTP_STATUS:";
 const UPLOAD_BYTES_MARKER: &str = "VOXTYPE_UPLOAD_BYTES:";
 const CURL_WRITE_OUT: &str =
     "%{stderr}\nVOXTYPE_HTTP_STATUS:%{http_code}\nVOXTYPE_UPLOAD_BYTES:%{size_upload}\n";
-
-/// Cheap cloneable cancellation flag shared by daemon and provider workers.
-#[derive(Clone, Debug, Default)]
-pub struct CancellationToken(Arc<AtomicBool>);
-
-impl CancellationToken {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-
-    #[must_use]
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-}
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretString(String);

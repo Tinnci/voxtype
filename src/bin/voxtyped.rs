@@ -1,16 +1,17 @@
 use std::error::Error;
-use std::thread;
-use std::time::Duration;
 use voxtype::{
     DBUS_NAME, DBUS_PATH,
     daemon::{DaemonEvent, VoxTypeDaemon},
 };
+use voxtype_app::wake_channel;
 use zbus::blocking::connection::Builder;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let (wake, wake_receiver) = wake_channel();
+    let daemon = VoxTypeDaemon::load_with_wake(wake)?;
     let connection = Builder::session()?
         .name(DBUS_NAME)?
-        .serve_at(DBUS_PATH, VoxTypeDaemon::load()?)?
+        .serve_at(DBUS_PATH, daemon)?
         .build()?;
 
     eprintln!("voxtyped ready on {DBUS_NAME}");
@@ -30,6 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             eprintln!("voxtyped recognition failed: {error}");
         }
         let events = daemon.drain_events();
+        let maintenance_wait = daemon.maintenance_wait();
         drop(daemon);
         for event in events {
             let result = match event {
@@ -56,7 +58,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         drop(interface);
-        thread::sleep(Duration::from_millis(100));
+        let _result = wake_receiver.recv_timeout(maintenance_wait);
     }
     Ok(())
 }

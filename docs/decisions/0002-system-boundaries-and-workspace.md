@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-07-15
+- Implemented: 2026-07-24
 
 ## Context
 
@@ -19,9 +20,10 @@ complexity without useful isolation.
 
 Use a small Cargo workspace once the second production provider begins:
 
-- `voxtype-core`: dependency-light domain model, state policy, provider contract,
-  routing types, and reusable provider contract tests;
-- `voxtype-app`: daemon orchestration and composition;
+- `voxtype-core`: dependency-light domain model, state policy,
+  provider-neutral lifecycle evidence, and routing types;
+- `voxtype-app`: daemon orchestration, the single runtime provider contract,
+  registry, and composition ports;
 - one package for each materially distinct provider;
 - KDE desktop and audio packages when their native/heavy dependencies would
   otherwise affect core edit loops;
@@ -30,6 +32,13 @@ Use a small Cargo workspace once the second production provider begins:
 Providers are linked at build time in version 0.x. Dynamic Rust plugins are not
 part of the supported ABI. A provider may later become a separate worker process
 when it needs strong crash, credential, licensing, or dependency isolation.
+
+The implemented application package owns the session machine, provider
+registry, route execution, health/usage accounting, terminal results, bounded
+events, and capture/insertion ports. Concrete configuration, secrets, network
+transports, D-Bus, PipeWire process capture, and KDE/Fcitx behavior remain in
+outer adapters. A configuration enum is never dispatched in the recognition
+hot path.
 
 ## Routing and fallback
 

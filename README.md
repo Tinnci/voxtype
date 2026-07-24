@@ -109,6 +109,7 @@ KCM also exposes VoxType through the configurable bridge addon.
 - [Delivery roadmap](docs/roadmap.md)
 - [ADR 0001: Rust](docs/decisions/0001-rust.md)
 - [ADR 0002: system boundaries and Cargo workspace](docs/decisions/0002-system-boundaries-and-workspace.md)
+- [ADR 0003: application events and runtime wake](docs/decisions/0003-application-events-and-runtime-wake.md)
 
 ## Development
 

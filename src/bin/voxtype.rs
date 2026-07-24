@@ -1,6 +1,8 @@
 use std::env;
 use std::error::Error;
+use std::fs;
 use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 use voxtype::audio::Recording;
 use voxtype::client::Client;
 use voxtype::config::{Config, ProviderConfig, config_path, store_secret};
@@ -386,6 +388,7 @@ fn doctor_provider_live(profile_name: &str, seconds: Option<&str>) -> Result<(),
     let recording = Recording::start_with_device(Some(config.audio.device.as_str()))?;
     std::thread::sleep(std::time::Duration::from_secs(seconds));
     let recording = recording.stop()?;
+    let cleanup = TemporaryPcm::new(&recording.path);
     let vad = vad::analyze_file(
         &recording.path,
         VadConfig {
@@ -394,16 +397,13 @@ fn doctor_provider_live(profile_name: &str, seconds: Option<&str>) -> Result<(),
         },
     )?;
     if !vad.speech_detected {
-        std::fs::remove_file(&recording.path)?;
         return Err("live provider doctor did not detect speech".into());
     }
     let trimmed_bytes = vad::trim_file(&recording.path, &vad)?;
     let transcription =
         transcribe_managed_pcm(&provider_config, &recording.path, &CancellationToken::new())
-            .map_err(voxtype_core::ProviderAttemptFailure::into_error);
-    let cleanup = std::fs::remove_file(&recording.path);
-    let transcription = transcription?;
-    cleanup?;
+            .map_err(voxtype_core::ProviderAttemptFailure::into_error)?;
+    cleanup.remove()?;
     println!(
         "provider.live=ok provider={} captured_ms={} sent_audio_ms={} partials={} provider_vad_started={} provider_vad_finished={} transcript={}",
         profile.primary,
@@ -473,6 +473,7 @@ fn doctor_audio() -> Result<(), Box<dyn Error>> {
     let recording = Recording::start_with_device(Some(config.audio.device.as_str()))?;
     std::thread::sleep(std::time::Duration::from_millis(500));
     let result = recording.stop()?;
+    let cleanup = TemporaryPcm::new(&result.path);
     let vad = vad::analyze_file(
         &result.path,
         VadConfig {
@@ -480,8 +481,7 @@ fn doctor_audio() -> Result<(), Box<dyn Error>> {
             minimum_voiced_frames: config.audio.vad_minimum_voiced_frames,
         },
     )?;
-    let cleanup = std::fs::remove_file(&result.path);
-    cleanup?;
+    cleanup.remove()?;
     if result.bytes == 0 {
         return Err("audio capture produced no PCM data".into());
     }
@@ -506,6 +506,42 @@ fn doctor_audio() -> Result<(), Box<dyn Error>> {
         vad.peak >= 32_000,
     );
     Ok(())
+}
+
+struct TemporaryPcm {
+    path: PathBuf,
+    removed: bool,
+}
+
+impl TemporaryPcm {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_owned(),
+            removed: false,
+        }
+    }
+
+    fn remove(mut self) -> io::Result<()> {
+        remove_if_present(&self.path)?;
+        self.removed = true;
+        Ok(())
+    }
+}
+
+impl Drop for TemporaryPcm {
+    fn drop(&mut self) {
+        if !self.removed {
+            let _result = remove_if_present(&self.path);
+        }
+    }
+}
+
+fn remove_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 const fn microphone_level_status(peak: u16) -> &'static str {

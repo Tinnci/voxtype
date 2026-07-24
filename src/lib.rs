@@ -8,6 +8,8 @@ pub mod daemon;
 pub mod desktop;
 pub mod fcitx;
 pub mod grammar;
+pub mod insertion;
+pub mod provider_adapters;
 pub mod qml;
 pub mod vad;
 

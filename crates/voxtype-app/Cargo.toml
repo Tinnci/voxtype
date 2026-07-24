@@ -1,0 +1,14 @@
+[package]
+name = "voxtype-app"
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.85"
+description = "Runtime-neutral application orchestration for VoxType"
+repository = "https://github.com/Tinnci/voxtype"
+publish = false
+
+[dependencies]
+voxtype-core = { path = "../voxtype-core" }
+
+[lints]
+workspace = true

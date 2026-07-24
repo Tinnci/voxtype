@@ -1,8 +1,9 @@
 # Implementation layers and replacement plan
 
-This document separates production behavior, deliberate test doubles, and
-contracts that are not yet connected to the running daemon. A green mock flow
-is never evidence of ASR quality or desktop delivery correctness.
+This document separates production behavior, deliberate test doubles, and the
+remaining future contracts that are not connected to the running daemon. A
+green mock flow is never evidence of ASR quality or desktop delivery
+correctness.
 
 ## Layer 0: session policy and orchestration
 
@@ -15,12 +16,19 @@ transport-started plus conservative `NotAccepted`, `PossiblyAccepted`, or
 exposure from the provider type; ambiguous cancellation or connection loss
 requires explicit buffered replay consent.
 
-The remaining boundary issue is that the running daemon still dispatches a
-configuration enum instead of the reusable core provider trait/registry. The
-next orchestration increment is a single `ProviderAdapter` contract returning
-an attempt outcome with lifecycle evidence, followed by a bounded event queue
-that emits every state transition rather than reconstructing transitions from
-a 100 ms snapshot.
+`voxtype-app` now owns the session machine, provider registry, routing,
+health/usage accounting, terminal-result cache, bounded lifecycle queue, and
+coalescing wake handle. The running daemon uses one `ProviderAdapter` contract
+returning attempt outcomes with lifecycle evidence; configuration enums are
+translated only during composition. Provider completion and lifecycle events
+wake the daemon immediately instead of waiting for the former fixed 100 ms
+loop. The only periodic 100 ms maintenance is recording-level telemetry and
+maximum-duration enforcement.
+
+The next application-level boundary is live audio: every production adapter
+currently consumes a completed PCM spool. True partial results and provider
+endpointing require a bounded streaming audio source plus event sink without
+changing session/routing ownership.
 
 ## Layer 1: capture and speech signal processing
 
@@ -30,7 +38,9 @@ preferred native PipeWire capture adapter; `parec` remains a compatibility
 backend only when the native command is unavailable. Both expose stream
 failures directly while keeping the provider-facing format at mono 16 kHz PCM.
 
-The capture reader now publishes a bounded stream of 20 ms RMS, peak, and
+The `CaptureAdapter`/`CaptureSession` port now separates application
+orchestration from the concrete `pw-record`/`parec` process. The capture reader
+publishes a bounded stream of 20 ms RMS, peak, and
 clipping metrics without retaining audio in the UI path. The daemon consumes
 those frames with the same stateful VAD used for live speech indication and
 updates the overlay with structured level fields. Dropped telemetry never
@@ -80,6 +90,8 @@ snapshots. A transcript-free `SessionFinished` event reports the final outcome,
 stable error code, insertion backend, and character count for CLI/automation.
 The tray uses state events for normal SNI icon/status and dbusmenu updates,
 while a five-second status read remains only as disconnect/reconnect protection.
+Capture, provider routing, insertion, and the complete private P2P D-Bus path
+have deterministic fake-backed integration coverage.
 
 ## Layer 4: user experience, configuration, and diagnostics
 
@@ -102,7 +114,8 @@ remain labelled as such.
 ## Layer 5: verification and delivery
 
 Keep fake capture, loopback HTTP, synthetic PCM, and command-process fixtures.
-Add D-Bus daemon integration, provider contract tests, bounded backpressure,
+The private P2P D-Bus test now covers the complete fake-backed session path.
+Continue adding provider-adapter conformance cases, bounded backpressure,
 focus-change/secure-field checks, suspend/hot-plug recovery, and an opt-in live
 ASR smoke test. The release matrix covers Qt, GTK, Chromium/Electron,
 LibreOffice, and a terminal on Plasma Wayland.

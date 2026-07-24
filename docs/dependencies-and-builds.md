@@ -13,13 +13,16 @@ The MVP starts with standard threads and bounded `std::sync` channels:
 
 - `pw-record` stdout reader with a `parec` compatibility fallback;
 - synchronous provider request worker;
-- serialized application state machine;
+- serialized `voxtype-app` state owner;
+- capacity-one coalescing wake channel for D-Bus/application/provider events;
 - blocking D-Bus adapter as required.
 
-This workload permits only one active recognition session, so a general-purpose
-async scheduler is not automatically justified. Tokio may be introduced behind
-an adapter feature if measurements show a clear benefit. Core APIs must remain
-runtime-neutral.
+This workload permits only one active recognition session. Provider completion
+and state changes wake the daemon immediately; the 100 ms timer exists only
+while recording for content-free audio telemetry and the safety deadline. A
+general-purpose async scheduler is therefore not automatically justified.
+Tokio may be introduced behind an adapter feature if measurements show a clear
+benefit. Core and application APIs remain runtime-neutral.
 
 ## Current dependency budget
 
@@ -66,19 +69,22 @@ fragile implementations.
 
 ## Workspace layout
 
-The current workspace intentionally has no feature matrix:
+The current workspace keeps the default feature matrix narrow:
 
 ```text
 voxtype                    application library + thin CLI/daemon/tray binaries
 crates/voxtype-core        dependency-free domain policy and state machine
+crates/voxtype-app         runtime-neutral orchestration, registry, ports, events
 crates/voxtype-provider-common  audited secret/endpoint/WAV helpers
 crates/voxtype-provider-deepgram  official Deepgram prerecorded adapter
 crates/voxtype-provider-rest  REST/WAV/JSON adapter
 ```
 
-This keeps the fastest policy tests independent from `zbus`, TOML, JSON, and
-desktop code while avoiding feature combinations that would duplicate Cargo
-artifacts. A new package is justified only when a provider brings materially
+This keeps the fastest policy and orchestration tests independent from `zbus`,
+TOML, JSON, desktop code, TLS, and codecs while avoiding feature combinations
+that would duplicate Cargo artifacts. The `zbus` P2P feature is enabled only
+for dev/test builds to exercise the real D-Bus interface over a private Unix
+socket. A new package is justified only when a provider brings materially
 different protocol, SDK, native build, or licensing risk.
 
 ## Crate/module strategy
