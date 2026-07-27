@@ -1,8 +1,9 @@
 # Doubao managed credential bundle
 
-The unofficial Doubao provider is compiled only with the default-off
-`doubao-unofficial` feature. Non-secret TOML contains only a Secret Service
-reference and timing policy:
+The unofficial Doubao provider is a default-compiled Tier 1 compatibility
+target. `doubao-unofficial` remains as the config kind and Cargo feature name so
+existing installations keep working. Non-secret TOML contains only a Secret
+Service reference and timing policy:
 
 ```toml
 [providers.doubao]
@@ -13,19 +14,24 @@ total_timeout_seconds = 180
 frame_interval_millis = 20
 ```
 
-The referenced Secret Service value is a compact, single-line, schema-versioned
-JSON object:
+The referenced Secret Service value is a compact, schema-versioned JSON object.
+It is generated from the compatibility profile pinned to
+`Tinnci/doubao-asr-for-ha` revision
+`ca4ed3ff8241d2824e21c90d7df3f1a463da6ed5`:
 
 ```json
-{"schema":1,"registration_endpoint":"https://registration.example.invalid/service","settings_endpoint":"https://settings.example.invalid/service","user_agent":"licensed-client-profile","common_query":[["aid","licensed-value"],["cdid","persistent-secret"]],"device_id":"persistent-secret","install_id":"persistent-secret","websocket_endpoint":"wss://websocket.example.invalid/session?device_id=persistent-secret","websocket_headers":[["proto-version","licensed-value"],["x-custom-keepalive","licensed-value"]],"session":{"audio_info":{"channel":1,"sample_rate":16000,"format":"speech_opus"}}}
+{"schema":1,"registration_endpoint":"https://…","settings_endpoint":"https://…","user_agent":"…","common_query":[["cdid","persistent-secret"]],"device_id":"persistent-secret","install_id":"persistent-secret","websocket_endpoint":"wss://…?device_id=persistent-secret","websocket_headers":[["proto-version","v2"]],"session":{"audio_info":{"channel":1,"sample_rate":16000,"format":"speech_opus"}}}
 ```
 
-All endpoint/profile values above are placeholders. VoxType deliberately does
-not ship the observed Android application identity, version, signature, device
-fingerprint, or production endpoint defaults. A separately licensed identity
-profile must create the exact bundle.
+The redacted example is illustrative; do not hand-edit it. In Settings:
 
-Store the compact JSON either through the feature-enabled settings panel or:
+1. add a `doubao-unofficial` provider;
+2. click **自动初始化兼容凭据**;
+3. wait for device registration and Secret Service storage;
+4. run the live provider doctor before relying on it for dictation.
+
+Existing managed bundles can still be imported through the password-masked
+field or:
 
 ```text
 voxtype secret set doubao-managed-bundle
@@ -59,7 +65,12 @@ Security properties:
 - the service does not report LLM token consumption, so token usage remains
   unknown rather than zero.
 
-The current bundle assumes an already registered device. Automatic identity
-generation, device registration, and atomic Secret Service bundle replacement
-remain separate work because they require an explicit licensing/distribution
-decision for the client identity profile.
+Automatic provisioning is deliberately explicit: opening Settings or creating a
+provider does not contact the service. The initialization button generates three
+local pseudonymous identifiers, registers one device, validates the resulting
+bundle, then stores it with `secret-tool`. Reprovisioning is refused while a
+bundle already exists so an accidental click cannot silently replace identity.
+
+The compatibility identity is adapted from a PolyForm Noncommercial 1.0.0
+source. Distribution or use that is not covered by that license requires a
+separate license. See [Third-party notices](../THIRD_PARTY_NOTICES.md).

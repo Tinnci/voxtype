@@ -59,6 +59,9 @@ second service.
   provider-reported usage parsing.
 - `voxtype-provider-deepgram`: official Deepgram binary-upload request and
   nested transcript response parsing.
+- `voxtype-provider-doubao`: default-compiled Tier 1 compatibility with the
+  pinned `Tinnci/doubao-asr-for-ha` behavior, isolated behind an unofficial
+  protocol and licensing boundary.
 - `voxtype-provider-common`: audited credential redaction, endpoint validation,
   and PCM-to-WAV staging shared only after two cloud adapters proved the need.
 - root `voxtype` package: D-Bus composition, configured provider adapters, audio
@@ -75,7 +78,7 @@ voxtype/
   crates/
     voxtype-core/             # dependency-light policy and contracts
     voxtype-app/              # runtime-neutral orchestration and ports
-    voxtype-provider-doubao/  # unofficial protocol, isolated license/risk
+    voxtype-provider-doubao/  # Tier 1 unofficial protocol, isolated license/risk
     voxtype-provider-<name>/  # another online provider
   src/bin/
     voxtype.rs                # thin CLI

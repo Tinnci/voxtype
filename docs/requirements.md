@@ -405,6 +405,14 @@ Before implementing the Doubao provider:
 4. Document provider terms, unofficial status, privacy disclosure, and allowed
    distribution model.
 
+Tier 1 compatibility decision: the client-identity profile is adapted from
+`Tinnci/doubao-asr-for-ha` under PolyForm Noncommercial 1.0.0 and is pinned to a
+reviewed revision. Default builds therefore include a noncommercial component;
+commercial distribution requires a separate license or a build without the
+`doubao-unofficial` feature. The Rust transport and protocol state machine
+remain independently implemented. `THIRD_PARTY_NOTICES.md` preserves the
+upstream notice and MIT-origin credit.
+
 ## 14. MVP release gate
 
 Version 0.1 is ready only when all of the following are true:

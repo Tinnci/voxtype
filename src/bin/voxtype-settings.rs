@@ -18,6 +18,13 @@ use voxtype::config::{
 };
 use voxtype::qml;
 use voxtype_core::ProviderId;
+#[cfg(feature = "doubao-unofficial")]
+use voxtype_provider_common::CancellationToken;
+#[cfg(feature = "doubao-unofficial")]
+use voxtype_provider_doubao::{
+    managed::ManagedCredentialBundle,
+    tinnci_compat::{UPSTREAM_REPOSITORY, UPSTREAM_REVISION, provision_managed_bundle},
+};
 use zbus::blocking::Connection;
 
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
@@ -164,6 +171,10 @@ fn route(request: &Request<'_>) -> io::Result<Response> {
         ("POST", "/calibrate") => calibrate_microphone(),
         ("POST", "/provider") => create_provider(request.body),
         ("POST", "/open-config") => open_config(),
+        #[cfg(feature = "doubao-unofficial")]
+        ("POST", path) if path.starts_with("/provision/") => {
+            provision_provider(&percent_decode(&path[11..])?)
+        }
         ("POST", path) if path.starts_with("/provider/") => {
             save_provider(&percent_decode(&path[10..])?, request.body)
         }
@@ -416,6 +427,9 @@ fn provider_state(
         "smart_format": smart_format,
         "display_name": if kind == "doubao-unofficial" { "Doubao（非官方兼容）" } else { kind },
         "risk_label": if kind == "doubao-unofficial" { "unofficial-undocumented" } else { "" },
+        "support_tier": if kind == "doubao-unofficial" { "tier-1" } else { "standard" },
+        "compatibility_source": compatibility_source(kind),
+        "compatibility_revision": compatibility_revision(kind),
         "credential_mode": if kind == "doubao-unofficial" { "managed-bootstrap" } else if secret_ref.is_empty() { "none" } else { "api-key" },
         "usage_capabilities": {
             "requests": true,
@@ -433,6 +447,26 @@ fn provider_health_for(status: &Value, provider_id: &str) -> Value {
         .pointer(&format!("/providers/{}", json_pointer_escape(provider_id)))
         .cloned()
         .unwrap_or(Value::Null)
+}
+
+fn compatibility_source(kind: &str) -> &'static str {
+    #[cfg(feature = "doubao-unofficial")]
+    if kind == "doubao-unofficial" {
+        return UPSTREAM_REPOSITORY;
+    }
+    #[cfg(not(feature = "doubao-unofficial"))]
+    let _ = kind;
+    ""
+}
+
+fn compatibility_revision(kind: &str) -> &'static str {
+    #[cfg(feature = "doubao-unofficial")]
+    if kind == "doubao-unofficial" {
+        return UPSTREAM_REVISION;
+    }
+    #[cfg(not(feature = "doubao-unofficial"))]
+    let _ = kind;
+    ""
 }
 
 fn provider_readiness(kind: &str, secret_state: &str, health: &Value) -> &'static str {
@@ -518,6 +552,13 @@ fn apply_provider_create(config: &mut Config, update: &CreateProviderUpdate) -> 
             secret,
             timeout_seconds: 30,
             smart_format: true,
+        },
+        #[cfg(feature = "doubao-unofficial")]
+        "doubao-unofficial" => ProviderConfig::DoubaoUnofficial {
+            secret: format!("{id}-managed-bundle"),
+            phase_timeout_seconds: 15,
+            total_timeout_seconds: 180,
+            frame_interval_millis: 20,
         },
         _ => return Err("unsupported provider kind".to_owned()),
     };
@@ -686,8 +727,12 @@ fn save_quota(provider: &str, body: &[u8]) -> io::Result<Response> {
 
 fn save_secret(name: &str, body: &[u8]) -> io::Result<Response> {
     let config = Config::load_or_create().map_err(domain_io)?;
-    let known = config.providers.values().any(|provider| {
-        matches!(provider, ProviderConfig::OpenaiCompatible { secret, .. } | ProviderConfig::Deepgram { secret, .. } if secret == name)
+    let known = config.providers.values().any(|provider| match provider {
+        ProviderConfig::OpenaiCompatible { secret, .. }
+        | ProviderConfig::Deepgram { secret, .. } => secret == name,
+        #[cfg(feature = "doubao-unofficial")]
+        ProviderConfig::DoubaoUnofficial { secret, .. } => secret == name,
+        ProviderConfig::Mock { .. } | ProviderConfig::Command { .. } => false,
     });
     if !known {
         return Ok(Response::error(404, "secret reference is not configured"));
@@ -695,11 +740,57 @@ fn save_secret(name: &str, body: &[u8]) -> io::Result<Response> {
     if body.is_empty() || body.len() > 16 * 1024 || body.contains(&0) {
         return Ok(Response::error(
             400,
-            "API key must contain 1 to 16384 bytes",
+            "secret material must contain 1 to 16384 bytes",
         ));
+    }
+    #[cfg(feature = "doubao-unofficial")]
+    if config.providers.values().any(
+        |provider| matches!(provider, ProviderConfig::DoubaoUnofficial { secret, .. } if secret == name),
+    ) {
+        let value =
+            voxtype_provider_common::SecretString::try_new(String::from_utf8(body.to_vec()).map_err(
+                |_| io::Error::new(io::ErrorKind::InvalidInput, "credential bundle is not UTF-8"),
+            )?)
+            .map_err(domain_io)?;
+        ManagedCredentialBundle::parse(&value).map_err(domain_io)?;
     }
     store_secret(name, body).map_err(domain_io)?;
     Ok(Response::json(&json!({"ok": true})))
+}
+
+#[cfg(feature = "doubao-unofficial")]
+fn provision_provider(provider: &str) -> io::Result<Response> {
+    let config = Config::load_or_create().map_err(domain_io)?;
+    let Some(ProviderConfig::DoubaoUnofficial { secret, .. }) = config.providers.get(provider)
+    else {
+        return Ok(Response::error(
+            404,
+            "the requested Doubao compatibility provider is not configured",
+        ));
+    };
+    match secret_state(secret) {
+        "configured" => {
+            return Ok(Response::error(
+                400,
+                "managed credentials already exist; remove them explicitly before reprovisioning",
+            ));
+        }
+        "unavailable" => {
+            return Ok(Response::error(
+                400,
+                "Secret Service is unavailable; no upstream registration was attempted",
+            ));
+        }
+        _ => {}
+    }
+    let bundle = provision_managed_bundle(&CancellationToken::new()).map_err(domain_io)?;
+    ManagedCredentialBundle::parse(&bundle).map_err(domain_io)?;
+    store_secret(secret, bundle.expose().as_bytes()).map_err(domain_io)?;
+    Ok(Response::json(&json!({
+        "ok": true,
+        "upstream": UPSTREAM_REPOSITORY,
+        "revision": UPSTREAM_REVISION,
+    })))
 }
 
 fn persist_and_reload(config: &Config) -> io::Result<Response> {
@@ -938,6 +1029,15 @@ mod tests {
         assert_eq!(state["kind"], "doubao-unofficial");
         assert_eq!(state["credential_mode"], "managed-bootstrap");
         assert_eq!(state["risk_label"], "unofficial-undocumented");
+        assert_eq!(state["support_tier"], "tier-1");
+        assert_eq!(
+            state["compatibility_source"],
+            "https://github.com/Tinnci/doubao-asr-for-ha"
+        );
+        assert_eq!(
+            state["compatibility_revision"],
+            "ca4ed3ff8241d2824e21c90d7df3f1a463da6ed5"
+        );
         assert_eq!(state["usage_capabilities"]["tokens"], false);
         assert_eq!(state["endpoint"], "");
     }
@@ -971,6 +1071,43 @@ text = "demo"
         assert!(matches!(
             config.providers["work-asr"],
             ProviderConfig::Deepgram { .. }
+        ));
+    }
+
+    #[cfg(feature = "doubao-unofficial")]
+    #[test]
+    fn creates_tier_one_doubao_provider_without_placeholder_endpoint() {
+        let mut config: Config = toml::from_str(
+            r#"schema_version = 1
+default_profile = "demo"
+[desktop]
+[audio]
+[profiles.demo]
+primary = "demo"
+[providers.demo]
+kind = "mock"
+text = "demo"
+"#,
+        )
+        .expect("fixture config");
+        let update = CreateProviderUpdate {
+            id: "doubao".to_owned(),
+            kind: "doubao-unofficial".to_owned(),
+            endpoint: String::new(),
+            model: String::new(),
+            language: "zh".to_owned(),
+            make_default: true,
+        };
+        apply_provider_create(&mut config, &update).expect("Doubao provider creation");
+        assert_eq!(config.default_profile, "doubao");
+        assert!(matches!(
+            config.providers["doubao"],
+            ProviderConfig::DoubaoUnofficial {
+                ref secret,
+                phase_timeout_seconds: 15,
+                total_timeout_seconds: 180,
+                frame_interval_millis: 20,
+            } if secret == "doubao-managed-bundle"
         ));
     }
 

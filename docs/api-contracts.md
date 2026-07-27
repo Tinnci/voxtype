@@ -471,17 +471,19 @@ device = "default"
 queue_chunks = 50
 
 [profiles.default]
-provider = "doubao-unofficial"
-language = "zh-CN"
-
-[profiles.default.routing]
+primary = "doubao"
 fallbacks = []
+language = "zh"
 replay = "never"
 
-[providers.doubao-unofficial]
-credential = "secret-service://voxtype/doubao/default"
-response_timeout_seconds = 15
+[providers.doubao]
+kind = "doubao-unofficial"
+secret = "doubao-managed-bundle"
+phase_timeout_seconds = 15
+total_timeout_seconds = 180
+frame_interval_millis = 20
 ```
 
-Secrets, transcripts, device registration bodies, and raw provider tokens are
-never valid configuration values.
+Secret values, transcripts, device registration bodies, persistent identifiers,
+and raw provider tokens are never valid TOML configuration values. The `secret`
+field is only a Secret Service reference.

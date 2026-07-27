@@ -35,6 +35,7 @@ benefit. Core and application APIs remain runtime-neutral.
 | HTTP/TLS | system `curl` | reuse distribution TLS, proxy, and certificates |
 | JSON | `serde_json` in REST/settings adapters | no JSON in core domain APIs |
 | Secrets | system `secret-tool` / Secret Service | secret material is not stored in TOML or argv |
+| Pseudonymous IDs | `uuid` v4 in the Doubao adapter | generated only during explicit provisioning |
 | Desktop | D-Bus, Fcitx socket, QML files, and small system tools | no Qt or KF6 linkage in Rust binaries |
 
 Cloud adapters share one bounded curl runner. It disables user curl
@@ -77,6 +78,7 @@ crates/voxtype-core        dependency-free domain policy and state machine
 crates/voxtype-app         runtime-neutral orchestration, registry, ports, events
 crates/voxtype-provider-common  audited secret/endpoint/WAV helpers
 crates/voxtype-provider-deepgram  official Deepgram prerecorded adapter
+crates/voxtype-provider-doubao  Tier 1 unofficial WebSocket/Opus adapter
 crates/voxtype-provider-rest  REST/WAV/JSON adapter
 ```
 
@@ -185,8 +187,8 @@ cargo build --release
 stat -c '%s' target/release/voxtype
 ```
 
-The user installer accepts an explicit feature list without changing normal
-distribution defaults:
+Doubao compatibility is included in normal distribution builds. The legacy
+feature name remains accepted for scripts that already pass it:
 
 ```bash
 VOXTYPE_FEATURES=doubao-unofficial ./scripts/install-user.sh

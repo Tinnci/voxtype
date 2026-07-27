@@ -1160,6 +1160,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tungstenite",
+ "uuid",
  "voxtype-core",
  "voxtype-provider-common",
  "zeroize",

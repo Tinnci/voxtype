@@ -171,6 +171,37 @@ passed to `curl` through private stdin configuration and is not exposed in the
 process arguments. See [Deepgram provider](deepgram-provider.md) for the API,
 privacy, and failure boundary.
 
+## Doubao compatibility provider
+
+Doubao compatibility is a default-compiled Tier 1 provider based on
+[`Tinnci/doubao-asr-for-ha`](https://github.com/Tinnci/doubao-asr-for-ha).
+It targets the same unofficial Android-input-method WebSocket service, not the
+official Volcengine API. The service can change or reject access without notice.
+
+Create the provider in `voxtype-settings`, then click **自动初始化兼容凭据**.
+VoxType generates pseudonymous device identifiers, performs the upstream device
+registration, and stores the resulting managed bundle in Secret Service. TOML
+contains only the reference and timeout policy:
+
+```toml
+[profiles.doubao]
+primary = "doubao"
+fallbacks = []
+language = "zh"
+replay = "never"
+
+[providers.doubao]
+kind = "doubao-unofficial"
+secret = "doubao-managed-bundle"
+phase_timeout_seconds = 15
+total_timeout_seconds = 180
+frame_interval_millis = 20
+```
+
+Run `voxtype doctor provider-live doubao 6` for an explicit real-audio check.
+See [Doubao managed credentials](doubao-managed-credentials.md) for the data,
+privacy, retry, and licensing boundaries.
+
 ## Consumption and soft quotas
 
 VoxType separates three different kinds of data:

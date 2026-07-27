@@ -5,7 +5,8 @@ provider, official Deepgram batch provider, local command provider, Fcitx5
 focus-safe insertion, copy-only fallback, recording safety deadline, settings,
 stateful VAD, cancellable background provider work, and desktop integration are
 implemented.
-The unofficial Doubao Provider is now active work. A dependency-light,
+The unofficial Doubao Provider is now a default-compiled Tier 1 compatibility
+target. A dependency-light,
 clean-room protocol crate implements the bounded protobuf envelope, exact 20 ms
 PCM framing, final/VAD event interpretation, bounded bootstrap response parsing,
 redacted persistent IDs, zeroizing tokens, and the exact settings-body MD5
@@ -22,12 +23,13 @@ streams bounded PCM frames through Opus while concurrently polling interim/final
 events, enforces phase/total deadlines, and returns replay-safe failure evidence.
 The runner now refreshes an authentication-failed StartTask token exactly once
 before any audio upload and never retries after ambiguous/accepted audio.
-Feature-gated daemon/config/settings integration now consumes a redacted,
-versioned Secret Service bundle and never places device identity or endpoints in
-TOML. Production client-identity generation, automatic registration/atomic
-bundle replacement, installation with the feature, and live verification remain
-gated by the distribution/licensing decision. The root `doubao-unofficial`
-feature remains disabled by default until those gates are satisfied.
+Daemon/config/settings integration consumes a redacted, versioned Secret
+Service bundle and never places device identity or endpoints in TOML. The pinned
+`Tinnci/doubao-asr-for-ha` compatibility profile now generates a pseudonymous
+identity, performs explicit device registration, validates the bundle, and
+stores it through Secret Service. The root `doubao-unofficial` feature is
+enabled by default. A real-audio check remains manual and the UI continues to
+label the protocol unofficial and undocumented.
 
 ## Phase 0: decisions and spikes
 

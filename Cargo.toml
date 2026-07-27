@@ -8,10 +8,10 @@ repository = "https://github.com/Tinnci/voxtype"
 publish = false
 
 [features]
-default = []
-# The observed Doubao Android-client protocol is unofficial and intentionally
-# excluded from normal distribution builds until its runtime and licensing
-# gates are satisfied.
+default = ["doubao-unofficial"]
+# Compatibility name retained for existing build scripts and configurations.
+# Doubao is a default-compiled Tier 1 provider, while the protocol itself
+# remains explicitly labelled unofficial.
 doubao-unofficial = ["dep:voxtype-provider-doubao"]
 
 [workspace]

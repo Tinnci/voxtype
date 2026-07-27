@@ -642,14 +642,18 @@ ApplicationWindow {
                             ComboBox {
                                 id: newProviderKind
                                 Layout.fillWidth: true
-                                model: ["openai-compatible", "deepgram"]
+                                model: ["doubao-unofficial", "openai-compatible", "deepgram"]
                             }
                             Button {
-                                text: qsTr("填充官方默认")
+                                text: newProviderKind.currentText === "doubao-unofficial"
+                                    ? qsTr("使用内置兼容配置") : qsTr("填充官方默认")
                                 onClicked: {
                                     if (newProviderKind.currentText === "deepgram") {
                                         newProviderEndpoint.text = "https://api.deepgram.com/v1/listen"
                                         newProviderModel.text = "nova-3"
+                                    } else if (newProviderKind.currentText === "doubao-unofficial") {
+                                        newProviderEndpoint.clear()
+                                        newProviderModel.clear()
                                     } else {
                                         newProviderEndpoint.text = "https://api.openai.com/v1/audio/transcriptions"
                                         newProviderModel.text = "gpt-4o-mini-transcribe"
@@ -661,7 +665,9 @@ ApplicationWindow {
                             TrackedTextField {
                                 id: newProviderEndpoint
                                 Layout.fillWidth: true
-                                placeholderText: "https://…"
+                                placeholderText: newProviderKind.currentText === "doubao-unofficial"
+                                    ? qsTr("由内置上游兼容配置管理") : "https://…"
+                                enabled: newProviderKind.currentText !== "doubao-unofficial"
                             }
                             Item { Layout.preferredWidth: 1 }
 
@@ -669,7 +675,10 @@ ApplicationWindow {
                             TrackedTextField {
                                 id: newProviderModel
                                 Layout.fillWidth: true
-                                placeholderText: newProviderKind.currentText === "deepgram" ? "nova-3" : "gpt-4o-mini-transcribe"
+                                placeholderText: newProviderKind.currentText === "doubao-unofficial"
+                                    ? qsTr("上游豆包输入法 ASR")
+                                    : newProviderKind.currentText === "deepgram" ? "nova-3" : "gpt-4o-mini-transcribe"
+                                enabled: newProviderKind.currentText !== "doubao-unofficial"
                             }
                             Item { Layout.preferredWidth: 1 }
 
@@ -688,7 +697,9 @@ ApplicationWindow {
                             Item { Layout.preferredWidth: 1 }
                             Label {
                                 Layout.fillWidth: true
-                                text: qsTr("创建后在下方安全保存 API 密钥。音频只有在实际使用该配置时才会上传。")
+                                text: newProviderKind.currentText === "doubao-unofficial"
+                                    ? qsTr("创建后在下方初始化匿名设备凭据。该接口非官方且可能随上游变化。")
+                                    : qsTr("创建后在下方安全保存 API 密钥。音频只有在实际使用该配置时才会上传。")
                                 wrapMode: Text.Wrap
                                 opacity: 0.65
                             }
@@ -696,8 +707,9 @@ ApplicationWindow {
                                 text: qsTr("创建 Provider 和配置")
                                 highlighted: true
                                 enabled: newProviderId.acceptableInput
-                                    && newProviderEndpoint.text.trim().length > 0
-                                    && newProviderModel.text.trim().length > 0
+                                    && (newProviderKind.currentText === "doubao-unofficial"
+                                        || (newProviderEndpoint.text.trim().length > 0
+                                            && newProviderModel.text.trim().length > 0))
                                     && newProviderLanguage.text.trim().length > 0
                                 onClicked: {
                                     const payload = {
@@ -709,10 +721,16 @@ ApplicationWindow {
                                         make_default: newProviderDefault.checked
                                     }
                                     root.callApi("POST", "/provider", JSON.stringify(payload), function(result) {
+                                        const nextStep = payload.kind === "doubao-unofficial"
+                                            ? qsTr("Provider 和配置已创建；请继续自动初始化兼容凭据")
+                                            : qsTr("Provider 和配置已创建；请继续保存 API 密钥")
+                                        const deferredStep = payload.kind === "doubao-unofficial"
+                                            ? qsTr("Provider 已创建；请继续自动初始化兼容凭据，daemon 稍后需要重新载入")
+                                            : qsTr("Provider 已创建；daemon 稍后需要重新载入")
                                         newProviderId.clear()
                                         root.refresh(result.daemon_reloaded
-                                            ? qsTr("Provider 和配置已创建；请继续保存 API 密钥")
-                                            : qsTr("Provider 已创建；daemon 稍后需要重新载入"))
+                                            ? nextStep
+                                            : deferredStep)
                                     })
                                 }
                             }
@@ -741,7 +759,7 @@ ApplicationWindow {
                                     }
                                     Label {
                                         visible: modelData.kind === "doubao-unofficial"
-                                        text: qsTr("非官方 · 未文档化协议")
+                                        text: qsTr("Tier 1 · 非官方兼容协议")
                                         color: "#f59e0b"
                                         font.bold: true
                                     }
@@ -869,9 +887,17 @@ ApplicationWindow {
                                         spacing: 8
                                         Label {
                                             Layout.fillWidth: true
-                                            text: qsTr("此 Provider 使用非官方、未文档化的兼容协议，可能随上游变更而失效。它不是豆包或火山引擎官方开放 API。音频会发送到第三方服务。")
+                                            text: qsTr("Tier 1 兼容目标为 Tinnci/doubao-asr-for-ha。此协议仍是非官方、未文档化接口，可能随上游变更而失效；它不是豆包或火山引擎官方开放 API。音频会发送到第三方服务。")
                                             wrapMode: Text.Wrap
                                             color: "#f59e0b"
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: qsTr("兼容来源：") + modelData.compatibility_source
+                                                + " @ " + String(modelData.compatibility_revision).substring(0, 12)
+                                            wrapMode: Text.WrapAnywhere
+                                            font.family: "monospace"
+                                            opacity: 0.7
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
@@ -883,6 +909,18 @@ ApplicationWindow {
                                                 color: modelData.secret_state === "configured" ? "#22c55e" : "#ef4444"
                                             }
                                             Item { Layout.fillWidth: true }
+                                            Button {
+                                                visible: modelData.secret_state !== "configured"
+                                                text: qsTr("自动初始化兼容凭据")
+                                                onClicked: {
+                                                    root.messageError = false
+                                                    root.message = qsTr("正在注册匿名兼容设备并获取托管配置…")
+                                                    root.callApi("POST", "/provision/" + encodeURIComponent(modelData.id),
+                                                        "", function() {
+                                                            root.refresh(qsTr("兼容凭据已保存；建议运行真实语音验证"))
+                                                        })
+                                                }
+                                            }
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true

@@ -9,6 +9,7 @@ pub mod managed;
 pub mod opus_codec;
 pub mod runner;
 pub mod session;
+pub mod tinnci_compat;
 pub mod websocket;
 
 use serde_json::Value;
@@ -30,9 +31,8 @@ const SETTINGS_BODY: &[u8] = b"body=null";
 
 /// HTTP endpoints and timeouts for the unofficial credential bootstrap.
 ///
-/// Endpoints intentionally have no built-in production defaults: choosing the
-/// observed private service and client identity is a distribution policy
-/// decision made above this protocol crate.
+/// Endpoint set used by one bootstrap attempt. The transport layer has no
+/// implicit production default; `tinnci_compat` owns the built-in profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BootstrapHttpConfig {
     pub registration_endpoint: String,

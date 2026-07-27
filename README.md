@@ -24,8 +24,8 @@ providers, desktop integration, audio capture, and text insertion replaceable.
 - Focus-locked Fcitx5 native commit with secure-field rejection, plus an
   explicit clipboard/ydotool compatibility backend.
 - OpenAI-compatible multipart REST, official Deepgram prerecorded REST,
-  deterministic mock, and isolated local-command providers with fallback
-  health tracking.
+  Tier 1 unofficial Doubao compatibility, deterministic mock, and isolated
+  local-command providers with fallback health tracking.
 - XDG TOML configuration and KWallet/Secret Service credential references.
 - Qt 6 settings panel for provider status, safe API-key updates, VAD/input
   settings, session-local consumption, and user-defined soft quotas.
@@ -44,11 +44,12 @@ Build and install user-owned components:
 ./scripts/install-user.sh
 ```
 
-The unofficial Doubao adapter remains opt-in and is installed explicitly:
-
-```bash
-VOXTYPE_FEATURES=doubao-unofficial ./scripts/install-user.sh
-```
+The Tier 1 Doubao compatibility adapter is included in the normal build. It is
+based on the public behavior of
+[`Tinnci/doubao-asr-for-ha`](https://github.com/Tinnci/doubao-asr-for-ha),
+remains unofficial, and may stop working when the undocumented upstream service
+changes. Create it from Settings and use **自动初始化兼容凭据** to register a
+pseudonymous device and store its credentials in Secret Service.
 
 The native Fcitx bridge is a small C++ addon and must be installed separately
 because Fcitx loads addons from system directories:
@@ -100,6 +101,7 @@ KCM also exposes VoxType through the configurable bridge addon.
 - [Implementation layers and replacement plan](docs/implementation-layers.md)
 - [API contracts](docs/api-contracts.md)
 - [Doubao protocol analysis](docs/doubao-api-analysis.md)
+- [Doubao managed credentials](docs/doubao-managed-credentials.md)
 - [Deepgram provider](docs/deepgram-provider.md)
 - [Dependency and build policy](docs/dependencies-and-builds.md)
 - [Local KDE input-method audit](docs/local-kde-ime-audit.md)
@@ -126,11 +128,12 @@ Run the same release installation path used for local integration testing:
 ./scripts/install-user.sh
 ```
 
-Set `VOXTYPE_FEATURES=doubao-unofficial` when testing the separately gated
-Doubao integration; the normal installation intentionally keeps it disabled.
-
 ## Reference-code policy
 
-No source code has been ported from the original Home Assistant project or from
-Rime. Their public designs are used only to inform system boundaries and API
-analysis; VoxType implementations and tests are written independently.
+The Doubao client identity compatibility profile is adapted from the pinned
+upstream revision documented in `tinnci_compat.rs`; its PolyForm Noncommercial
+terms and upstream MIT credit are recorded in
+[Third-party notices](THIRD_PARTY_NOTICES.md). Transport, persistence,
+protobuf, replay policy, and tests are implemented in Rust behind VoxType's own
+interfaces. Other reference projects inform system boundaries and API analysis
+without copying source.

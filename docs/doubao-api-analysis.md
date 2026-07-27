@@ -7,9 +7,14 @@ the Doubao Android input method. This is an unofficial, undocumented integration
 not evidence of a public API contract. Endpoints, request fields, identifiers,
 and behavior may change without notice.
 
-No reference source has been copied into VoxType. Before implementation, the
-licensing and provider terms described in the product requirements must be
-resolved.
+The transport and protocol implementation is independent Rust code. The small
+client-identity compatibility profile is now intentionally adapted from
+`Tinnci/doubao-asr-for-ha` at revision
+`ca4ed3ff8241d2824e21c90d7df3f1a463da6ed5` under its PolyForm
+Noncommercial 1.0.0 terms. Required credit and the upstream MIT origin are in
+`THIRD_PARTY_NOTICES.md`. `EvanDbg/doubao-ime-win` and its protocol reference
+`starccy/doubaoime-asr` were also checked as related upstream implementations;
+the pinned Tinnci revision remains the shipped compatibility authority.
 
 The clean-room implementation now lives in
 `crates/voxtype-provider-doubao`. It contains only independently documented
@@ -34,21 +39,19 @@ flushes automatic pong responses, and maps errors without exposing the query or
 headers. Loopback tests verify custom headers, binary duplex, ping/pong, remote
 plain-WS rejection, and cancellation during a stalled handshake.
 
-The crate deliberately contains no built-in production endpoint or Android
-identity template. The caller must supply both under an explicit distribution
-policy. The production identity profile, one-time token refresh, daemon wiring,
-and live opt-in verification remain. DNS still uses the standard resolver and
-is the only connection operation that cannot be interrupted by the current
-cancellation token.
-The root binary exposes a default-off `doubao-unofficial` build feature so this
-protocol is not linked into normal distribution builds merely because the
-workspace tests its isolated crate.
+The crate now contains a single pinned upstream compatibility profile with the
+observed endpoints, Android client version, request metadata, WebSocket query,
+headers, and session JSON. Provisioning is explicit in Settings and persists
+the registered identity only in Secret Service. DNS still uses the standard
+resolver and is the only connection operation that cannot be interrupted by
+the current cancellation token. The `doubao-unofficial` feature is enabled by
+default and retained as a compatibility/build switch.
 
-Feature-enabled daemon/config wiring now reads a versioned managed credential
-bundle from Secret Service, fetches a fresh settings token, invokes the bounded
-runner, and returns provider-neutral transcript/error evidence. TOML stores only
-the secret reference and timing policy. The settings backend labels the provider
-as unofficial, does not expose endpoint/model fields, uses a distinct managed
+Daemon/config wiring reads a versioned managed credential bundle from Secret
+Service, fetches a fresh settings token, invokes the bounded runner, and returns
+provider-neutral transcript/error evidence. TOML stores only the secret
+reference and timing policy. The settings backend labels the provider as
+unofficial, does not expose endpoint/model fields, uses a distinct managed
 credential control, and marks token/account quota as unsupported. See
 `doubao-managed-credentials.md`.
 
@@ -258,11 +261,10 @@ Provider-specific code owns:
 - mapping upstream errors to stable `ProviderError` categories.
 
 The credential bootstrap boundary accepts a bounded serialized registration
-document and exact common query metadata from a separately licensed
-client-identity layer. The HTTP transport does not infer where a persistent ID
-belongs. This keeps observed Android metadata out of the provider-neutral API
-while allowing loopback tests to verify exact POST/query/header behavior without
-contacting the service.
+document and exact common query metadata from `tinnci_compat.rs`. The HTTP
+transport does not infer where a persistent ID belongs. This keeps observed
+Android metadata out of the provider-neutral API while allowing loopback tests
+to verify exact POST/query/header behavior without contacting the service.
 
 It must expose only the provider-neutral traits in `api-contracts.md`. No Android
 identity constant, token, protobuf field number, or raw result JSON may escape
