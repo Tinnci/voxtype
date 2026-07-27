@@ -2,12 +2,14 @@
 
 #include <array>
 #include <algorithm>
+#include <charconv>
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -99,6 +101,16 @@ std::size_t byteOffset(std::string_view text, std::size_t characterOffset) {
         }
     }
     return text.size();
+}
+
+bool parseUnsigned(std::string_view value, std::uint64_t &result) {
+    if (value.empty()) {
+        return false;
+    }
+    const auto parsed =
+        std::from_chars(value.data(), value.data() + value.size(), result);
+    return parsed.ec == std::errc{} &&
+           parsed.ptr == value.data() + value.size();
 }
 
 struct ContextWindow {
@@ -273,6 +285,11 @@ private:
             commit2(field(message, 1), field(message, 2), field(message, 3),
                     sender, senderLength);
             return;
+        } else if (command == "REPLACE2") {
+            replace2(field(message, 1), field(message, 2), field(message, 3),
+                     field(message, 4), field(message, 5), field(message, 6),
+                     sender, senderLength);
+            return;
         } else if (command == "CANCEL") {
             response = cancel(field(message, 1));
         } else {
@@ -348,7 +365,8 @@ private:
 
     void commit(std::string_view session, std::string_view text,
                 sockaddr_un sender, socklen_t senderLength) {
-        if (legacyCommitPending_ || !pendingRequestId_.empty()) {
+        if (legacyCommitPending_ || !pendingRequestId_.empty() ||
+            !pendingReplaceRequestId_.empty()) {
             sendResponse(response("ERR", "commit-busy"), sender, senderLength);
             return;
         }
@@ -429,7 +447,8 @@ private:
             }
             return;
         }
-        if (legacyCommitPending_ || !pendingRequestId_.empty()) {
+        if (legacyCommitPending_ || !pendingRequestId_.empty() ||
+            !pendingReplaceRequestId_.empty()) {
             sendResponse(response("ERR", "commit-busy"), sender, senderLength);
             return;
         }
@@ -495,6 +514,173 @@ private:
         pendingCommit_->setOneShot();
     }
 
+    void replace2(std::string_view requestId, std::string_view generationValue,
+                  std::string_view startValue, std::string_view endValue,
+                  std::string_view expected, std::string_view replacement,
+                  sockaddr_un sender, socklen_t senderLength) {
+        std::uint64_t generation = 0;
+        std::uint64_t start = 0;
+        std::uint64_t end = 0;
+        if (requestId.empty()) {
+            sendResponse(response("ERR", "request-id-required"), sender,
+                         senderLength);
+            return;
+        }
+        if (!parseUnsigned(generationValue, generation) ||
+            !parseUnsigned(startValue, start) || !parseUnsigned(endValue, end) ||
+            start >= end || end > MaxContextCharacters ||
+            end - start > std::numeric_limits<unsigned int>::max()) {
+            sendResponse(response("ERR", "invalid-replacement"), sender,
+                         senderLength);
+            return;
+        }
+        if (requestId == completedReplaceRequestId_) {
+            if (generation == completedReplaceGeneration_ &&
+                start == completedReplaceStart_ && end == completedReplaceEnd_ &&
+                expected.size() == completedReplaceExpectedSize_ &&
+                textFingerprint(expected) == completedReplaceExpectedFingerprint_ &&
+                replacement.size() == completedReplaceReplacementSize_ &&
+                textFingerprint(replacement) ==
+                    completedReplaceReplacementFingerprint_) {
+                sendResponse(completedReplaceResponse_, sender, senderLength);
+            } else {
+                sendResponse(response("ERR", "request-id-mismatch"), sender,
+                             senderLength);
+            }
+            return;
+        }
+        if (requestId == pendingReplaceRequestId_) {
+            if (generation == pendingReplaceGeneration_ &&
+                start == pendingReplaceStart_ && end == pendingReplaceEnd_ &&
+                expected == pendingReplaceExpected_ &&
+                replacement == pendingReplaceReplacement_) {
+                pendingReplaceSender_ = sender;
+                pendingReplaceSenderLength_ = senderLength;
+            } else {
+                sendResponse(response("ERR", "request-id-mismatch"), sender,
+                             senderLength);
+            }
+            return;
+        }
+        if (legacyCommitPending_ || !pendingRequestId_.empty() ||
+            !pendingReplaceRequestId_.empty()) {
+            sendResponse(response("ERR", "commit-busy"), sender, senderLength);
+            return;
+        }
+        auto *context = instance_->lastFocusedInputContext();
+        if (!context || !context->hasFocus()) {
+            sendResponse(response("ERR", "no-focused-context"), sender,
+                         senderLength);
+            return;
+        }
+        if (isSecure(context)) {
+            sendResponse(response("ERR", "secure-context"), sender,
+                         senderLength);
+            return;
+        }
+        if (generation != contextGeneration_) {
+            sendResponse(response("ERR", "generation-changed"), sender,
+                         senderLength);
+            return;
+        }
+        const auto flags = context->capabilityFlags();
+        const auto &surrounding = context->surroundingText();
+        if (!flags.test(CapabilityFlag::SurroundingText) ||
+            !surrounding.isValid()) {
+            sendResponse(response("ERR", "surrounding-text-unavailable"), sender,
+                         senderLength);
+            return;
+        }
+        pendingReplaceContext_ = context->watch();
+        pendingReplaceRequestId_ = requestId;
+        pendingReplaceGeneration_ = generation;
+        pendingReplaceStart_ = static_cast<std::size_t>(start);
+        pendingReplaceEnd_ = static_cast<std::size_t>(end);
+        pendingReplaceExpected_ = expected;
+        pendingReplaceReplacement_ = replacement;
+        pendingReplaceSender_ = sender;
+        pendingReplaceSenderLength_ = senderLength;
+        pendingCommit_ = instance_->eventLoop().addDeferEvent(
+            [this](EventSource *) {
+                auto *pendingContext = pendingReplaceContext_.get();
+                std::string result;
+                if (!pendingContext || !pendingContext->hasFocus() ||
+                    pendingContext != instance_->lastFocusedInputContext()) {
+                    result = response("ERR", "focus-changed");
+                } else if (isSecure(pendingContext)) {
+                    result = response("ERR", "secure-context");
+                } else if (pendingReplaceGeneration_ != contextGeneration_) {
+                    result = response("ERR", "generation-changed");
+                } else {
+                    const auto flags = pendingContext->capabilityFlags();
+                    const auto &surrounding = pendingContext->surroundingText();
+                    if (!flags.test(CapabilityFlag::SurroundingText) ||
+                        !surrounding.isValid()) {
+                        result =
+                            response("ERR", "surrounding-text-unavailable");
+                    } else {
+                        const auto window =
+                            boundedContext(surrounding.text(),
+                                           surrounding.cursor(),
+                                           surrounding.anchor());
+                        const auto characters = utf8CharacterCount(window.text);
+                        if (pendingReplaceEnd_ > characters) {
+                            result = response("ERR", "source-changed");
+                        } else {
+                            const auto byteStart =
+                                byteOffset(window.text, pendingReplaceStart_);
+                            const auto byteEnd =
+                                byteOffset(window.text, pendingReplaceEnd_);
+                            const auto current =
+                                std::string_view(window.text)
+                                    .substr(byteStart, byteEnd - byteStart);
+                            if (current != pendingReplaceExpected_) {
+                                result = response("ERR", "source-changed");
+                            } else {
+                                const auto offset =
+                                    static_cast<std::int64_t>(
+                                        pendingReplaceStart_) -
+                                    static_cast<std::int64_t>(window.cursor);
+                                const auto size = static_cast<unsigned int>(
+                                    pendingReplaceEnd_ - pendingReplaceStart_);
+                                pendingContext->deleteSurroundingText(
+                                    static_cast<int>(offset), size);
+                                if (!pendingReplaceReplacement_.empty()) {
+                                    pendingContext->commitString(
+                                        pendingReplaceReplacement_);
+                                }
+                                result = dispatchedResponse(
+                                    pendingReplaceRequestId_);
+                            }
+                        }
+                    }
+                }
+                completedReplaceRequestId_ = pendingReplaceRequestId_;
+                completedReplaceGeneration_ = pendingReplaceGeneration_;
+                completedReplaceStart_ = pendingReplaceStart_;
+                completedReplaceEnd_ = pendingReplaceEnd_;
+                completedReplaceExpectedSize_ =
+                    pendingReplaceExpected_.size();
+                completedReplaceExpectedFingerprint_ =
+                    textFingerprint(pendingReplaceExpected_);
+                completedReplaceReplacementSize_ =
+                    pendingReplaceReplacement_.size();
+                completedReplaceReplacementFingerprint_ =
+                    textFingerprint(pendingReplaceReplacement_);
+                completedReplaceResponse_ = result;
+                const auto recipient = pendingReplaceSender_;
+                const auto recipientLength = pendingReplaceSenderLength_;
+                pendingReplaceRequestId_.clear();
+                pendingReplaceExpected_.clear();
+                pendingReplaceReplacement_.clear();
+                pendingReplaceSenderLength_ = 0;
+                pendingReplaceContext_.unwatch();
+                sendResponse(result, recipient, recipientLength);
+                return true;
+            });
+        pendingCommit_->setOneShot();
+    }
+
     void sendResponse(const std::string &value, const sockaddr_un &recipient,
                       socklen_t recipientLength) const {
         sendto(socketFd_, value.data(), value.size(), 0,
@@ -518,6 +704,11 @@ private:
         pendingSenderLength_ = 0;
         armedContext_.unwatch();
         armedSession_.clear();
+        pendingReplaceRequestId_.clear();
+        pendingReplaceExpected_.clear();
+        pendingReplaceReplacement_.clear();
+        pendingReplaceSenderLength_ = 0;
+        pendingReplaceContext_.unwatch();
     }
 
     Instance *instance_;
@@ -539,6 +730,24 @@ private:
     std::size_t completedTextSize_ = 0;
     std::uint64_t completedTextFingerprint_ = 0;
     std::string completedResponse_;
+    TrackableObjectReference<InputContext> pendingReplaceContext_;
+    std::string pendingReplaceRequestId_;
+    std::uint64_t pendingReplaceGeneration_ = 0;
+    std::size_t pendingReplaceStart_ = 0;
+    std::size_t pendingReplaceEnd_ = 0;
+    std::string pendingReplaceExpected_;
+    std::string pendingReplaceReplacement_;
+    sockaddr_un pendingReplaceSender_{};
+    socklen_t pendingReplaceSenderLength_ = 0;
+    std::string completedReplaceRequestId_;
+    std::uint64_t completedReplaceGeneration_ = 0;
+    std::size_t completedReplaceStart_ = 0;
+    std::size_t completedReplaceEnd_ = 0;
+    std::size_t completedReplaceExpectedSize_ = 0;
+    std::uint64_t completedReplaceExpectedFingerprint_ = 0;
+    std::size_t completedReplaceReplacementSize_ = 0;
+    std::uint64_t completedReplaceReplacementFingerprint_ = 0;
+    std::string completedReplaceResponse_;
     std::uint64_t contextGeneration_ = 1;
     std::vector<std::unique_ptr<HandlerTableEntry<EventHandler>>> contextWatchers_;
 };

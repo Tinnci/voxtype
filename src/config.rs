@@ -160,7 +160,6 @@ pub enum ProviderConfig {
         #[serde(default = "default_true")]
         smart_format: bool,
     },
-    #[cfg(feature = "doubao-unofficial")]
     DoubaoUnofficial {
         secret: String,
         #[serde(default = "default_timeout")]
@@ -254,7 +253,6 @@ impl Config {
                 }
                 _ => {}
             }
-            #[cfg(feature = "doubao-unofficial")]
             validate_doubao_provider(provider)?;
             let timeout_seconds = match provider {
                 ProviderConfig::OpenaiCompatible {
@@ -266,7 +264,6 @@ impl Config {
                 | ProviderConfig::Command {
                     timeout_seconds, ..
                 } => timeout_seconds,
-                #[cfg(feature = "doubao-unofficial")]
                 ProviderConfig::DoubaoUnofficial {
                     phase_timeout_seconds,
                     ..
@@ -546,7 +543,6 @@ fn validate_quotas(config: &Config) -> Result<(), VoxError> {
     Ok(())
 }
 
-#[cfg(feature = "doubao-unofficial")]
 fn validate_doubao_provider(provider: &ProviderConfig) -> Result<(), VoxError> {
     let ProviderConfig::DoubaoUnofficial {
         secret,
@@ -579,12 +575,10 @@ const fn default_true() -> bool {
     true
 }
 
-#[cfg(feature = "doubao-unofficial")]
 const fn default_doubao_total_timeout() -> u64 {
     180
 }
 
-#[cfg(feature = "doubao-unofficial")]
 const fn default_doubao_frame_interval() -> u64 {
     20
 }
@@ -748,7 +742,6 @@ mod tests {
         assert!(!serialized.contains("api_key"));
     }
 
-    #[cfg(feature = "doubao-unofficial")]
     #[test]
     fn round_trips_feature_gated_doubao_provider() {
         let mut config: Config = toml::from_str(DEFAULT_CONFIG).expect("default config parses");

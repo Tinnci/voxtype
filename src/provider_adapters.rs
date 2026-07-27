@@ -70,19 +70,33 @@ pub fn build_provider_registry(config: &Config) -> Result<ProviderRegistry, VoxE
                 timeout_seconds: *timeout_seconds,
                 smart_format: *smart_format,
             }),
-            #[cfg(feature = "doubao-unofficial")]
             ProviderConfig::DoubaoUnofficial {
                 secret,
                 phase_timeout_seconds,
                 total_timeout_seconds,
                 frame_interval_millis,
-            } => Arc::new(DoubaoAdapter {
-                id,
-                secret: secret.clone(),
-                phase_timeout: Duration::from_secs(*phase_timeout_seconds),
-                total_timeout: Duration::from_secs(*total_timeout_seconds),
-                frame_interval: Duration::from_millis(*frame_interval_millis),
-            }),
+            } => {
+                #[cfg(feature = "doubao-unofficial")]
+                {
+                    Arc::new(DoubaoAdapter {
+                        id,
+                        secret: secret.clone(),
+                        phase_timeout: Duration::from_secs(*phase_timeout_seconds),
+                        total_timeout: Duration::from_secs(*total_timeout_seconds),
+                        frame_interval: Duration::from_millis(*frame_interval_millis),
+                    })
+                }
+                #[cfg(not(feature = "doubao-unofficial"))]
+                {
+                    let _ = (
+                        secret,
+                        phase_timeout_seconds,
+                        total_timeout_seconds,
+                        frame_interval_millis,
+                    );
+                    Arc::new(UnavailableDoubaoAdapter { id })
+                }
+            }
             ProviderConfig::Command {
                 program,
                 args,
@@ -254,6 +268,34 @@ impl ProviderAdapter for DoubaoAdapter {
         };
         transcribe_managed_pcm(&config, input.pcm_path, cancellation)
             .map(|result| success_after_audio(result.text, ProviderUsage::default()))
+    }
+}
+
+#[cfg(not(feature = "doubao-unofficial"))]
+struct UnavailableDoubaoAdapter {
+    id: ProviderId,
+}
+
+#[cfg(not(feature = "doubao-unofficial"))]
+impl ProviderAdapter for UnavailableDoubaoAdapter {
+    fn id(&self) -> &ProviderId {
+        &self.id
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        recorded_pcm_capabilities()
+    }
+
+    fn recognize(
+        &self,
+        _input: RecognitionInput<'_>,
+        _cancellation: &CancellationToken,
+    ) -> Result<ProviderSuccess, ProviderAttemptFailure> {
+        Err(ProviderAttemptFailure::before_transport(VoxError::new(
+            ErrorCategory::Unavailable,
+            "provider.doubao_feature_unavailable",
+            "this build does not include the unofficial Doubao provider",
+        )))
     }
 }
 

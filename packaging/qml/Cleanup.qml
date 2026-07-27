@@ -5,9 +5,14 @@ import QtQuick.Layouts
 ApplicationWindow {
     id: root
     readonly property var args: Qt.application.arguments
-    readonly property string reportFile: args.length >= 1 ? args[args.length - 1] : ""
+    readonly property string apiBase: args.length >= 2 ? args[args.length - 2] : ""
+    readonly property string sessionToken: args.length >= 1 ? args[args.length - 1] : ""
     property var report: null
     property string loadError: ""
+    property string actionMessage: ""
+    property bool actionError: false
+    property bool busy: false
+    property bool applied: false
 
     width: 760
     height: 640
@@ -16,6 +21,29 @@ ApplicationWindow {
     visible: true
     title: qsTr("VoxType 文本整理审阅")
     color: "#111318"
+    flags: Qt.Tool | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus
+
+    function callApi(method, path, callback) {
+        root.busy = true
+        const request = new XMLHttpRequest()
+        request.open(method, apiBase + path + "?token=" + sessionToken)
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE)
+                return
+            root.busy = false
+            let result = null
+            try { result = JSON.parse(request.responseText) } catch (error) {}
+            if (request.status >= 200 && request.status < 300) {
+                root.actionError = false
+                callback(result)
+            } else {
+                root.actionError = true
+                root.actionMessage = result && result.error
+                    ? result.error : qsTr("文本整理操作失败")
+            }
+        }
+        request.send()
+    }
 
     header: ToolBar {
         background: Rectangle { color: "#191c23" }
@@ -163,32 +191,63 @@ ApplicationWindow {
                 }
             }
 
-            Label {
+            Rectangle {
+                visible: root.actionMessage.length > 0
                 Layout.fillWidth: true
-                text: qsTr("当前窗口只提供审阅，不会修改输入框。待 Fcitx generation 校验写回协议完成后再启用应用与撤销。")
-                color: "#9ca3af"
-                wrapMode: Text.Wrap
-                bottomPadding: 20
+                Layout.preferredHeight: actionLabel.implicitHeight + 24
+                radius: 10
+                color: root.actionError ? "#3b1d24" : "#16382d"
+                border.color: root.actionError ? "#7f303d" : "#2f765e"
+                Label {
+                    id: actionLabel
+                    anchors.fill: parent
+                    anchors.margins: 12
+                    text: root.actionMessage
+                    color: root.actionError ? "#fca5a5" : "#86efac"
+                    wrapMode: Text.Wrap
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.bottomMargin: 20
+                Label {
+                    Layout.fillWidth: true
+                    text: root.report && root.report.source
+                        ? qsTr("写回前会再次校验 Fcitx 焦点、generation 和原文。")
+                        : qsTr("最近一次转写没有可安全定位的输入框，因此只提供审阅。")
+                    color: "#9ca3af"
+                    wrapMode: Text.Wrap
+                }
+                Button {
+                    text: qsTr("撤销")
+                    enabled: root.applied && !root.busy
+                    onClicked: root.callApi("POST", "/undo", function() {
+                        root.applied = false
+                        root.actionMessage = qsTr("已撤销，原文已恢复")
+                    })
+                }
+                Button {
+                    text: root.busy ? qsTr("正在校验…") : qsTr("应用建议")
+                    highlighted: true
+                    enabled: root.report && root.report.source
+                        && !root.report.clean && !root.applied && !root.busy
+                    onClicked: root.callApi("POST", "/apply", function() {
+                        root.applied = true
+                        root.actionMessage = qsTr("建议已写回原输入框；如内容未继续变化，可在此撤销")
+                    })
+                }
             }
         }
     }
 
     Component.onCompleted: {
-        if (root.reportFile.length === 0) {
+        if (root.apiBase.length === 0 || root.sessionToken.length === 0) {
             root.loadError = qsTr("缺少整理报告")
             return
         }
-        const request = new XMLHttpRequest()
-        request.open("GET", "file://" + root.reportFile)
-        request.onreadystatechange = function() {
-            if (request.readyState !== XMLHttpRequest.DONE)
-                return
-            try {
-                root.report = JSON.parse(request.responseText)
-            } catch (error) {
-                root.loadError = qsTr("无法读取整理报告")
-            }
-        }
-        request.send()
+        root.callApi("GET", "/report", function(result) {
+            root.report = result
+        })
     }
 }

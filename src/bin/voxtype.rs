@@ -445,7 +445,6 @@ fn doctor_provider() -> Result<(), Box<dyn Error>> {
                 println!("provider.{id}.secret={secret_state}");
                 "deepgram"
             }
-            #[cfg(feature = "doubao-unofficial")]
             ProviderConfig::DoubaoUnofficial { secret, .. } => {
                 let secret_state = match voxtype::config::lookup_secret(secret) {
                     Ok(_) => "ok",
@@ -453,6 +452,9 @@ fn doctor_provider() -> Result<(), Box<dyn Error>> {
                     Err(_) => "unavailable",
                 };
                 println!("provider.{id}.credential_bundle={secret_state}");
+                if !cfg!(feature = "doubao-unofficial") {
+                    println!("provider.{id}.implementation=build-feature-required");
+                }
                 "doubao-unofficial"
             }
             ProviderConfig::Command { .. } => "command",

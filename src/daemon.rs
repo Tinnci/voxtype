@@ -212,14 +212,85 @@ impl VoxTypeDaemon {
         let mut response = serde_json::to_value(&report).map_err(|error| {
             fdo::Error::Failed(format!("could not serialize cleanup report: {error}"))
         })?;
+        let (review_start, review_end) = context.review_span();
         response["source"] = serde_json::json!({
             "kind": "fcitx",
             "program": context.target.program,
             "frontend": context.target.frontend,
             "generation": context.generation,
             "truncated": context.truncated,
+            "review_start": review_start,
+            "review_end": review_end,
         });
         Ok(response.to_string())
+    }
+
+    #[allow(clippy::unused_self)] // The Fcitx addon owns the mutable input context.
+    fn apply_context_cleanup(&self, payload: &str) -> fdo::Result<String> {
+        let report = parse_cleanup_payload(payload)?;
+        let context = FcitxBridge.context().map_err(map_error)?;
+        if context.target.program != report.program
+            || context.target.frontend != report.frontend
+            || context.generation != report.generation
+        {
+            return Err(fdo::Error::Failed(
+                "the focused input context changed; run text cleanup again".to_owned(),
+            ));
+        }
+        let (start, end) = context.review_span();
+        if start != report.review_start || end != report.review_end {
+            return Err(fdo::Error::Failed(
+                "the selected cleanup range changed; run text cleanup again".to_owned(),
+            ));
+        }
+        let original = context.review_text();
+        let verified = grammar::check(&original);
+        if verified.original_fingerprint != report.original_fingerprint
+            || verified.original_bytes != report.original_bytes
+            || verified.original_characters != report.original_characters
+            || verified.suggested != report.suggested
+            || verified.clean
+        {
+            return Err(fdo::Error::Failed(
+                "the cleanup report is stale or no longer matches local rules".to_owned(),
+            ));
+        }
+        FcitxBridge
+            .replace(&context, start, end, &original, &verified.suggested)
+            .map_err(map_error)?;
+        Ok(serde_json::json!({
+            "schema": 1,
+            "kind": "fcitx-replacement",
+            "program": context.target.program,
+            "frontend": context.target.frontend,
+            "original": original,
+            "suggested": verified.suggested,
+        })
+        .to_string())
+    }
+
+    #[allow(clippy::unused_self)] // The Fcitx addon owns the mutable input context.
+    fn undo_context_cleanup(&self, payload: &str) -> fdo::Result<String> {
+        let receipt = parse_cleanup_receipt(payload)?;
+        let context = FcitxBridge.context().map_err(map_error)?;
+        if context.target.program != receipt.program || context.target.frontend != receipt.frontend
+        {
+            return Err(fdo::Error::Failed(
+                "the original input context is no longer focused".to_owned(),
+            ));
+        }
+        let expected_characters = receipt.suggested.chars().count();
+        if expected_characters == 0 || expected_characters > context.cursor {
+            return Err(fdo::Error::Failed(
+                "the applied text is no longer immediately before the cursor".to_owned(),
+            ));
+        }
+        let start = context.cursor - expected_characters;
+        let end = context.cursor;
+        FcitxBridge
+            .replace(&context, start, end, &receipt.suggested, &receipt.original)
+            .map_err(map_error)?;
+        Ok(serde_json::json!({"undone": true}).to_string())
     }
 
     fn clear_history(&mut self) {
@@ -1024,6 +1095,113 @@ fn cleanup_overlay_body(report: &grammar::GrammarReport, source: Option<&str>) -
         "{prefix}{} safe · {} need review",
         report.safe_edit_count, report.review_edit_count
     )
+}
+
+struct CleanupPayload {
+    program: String,
+    frontend: String,
+    generation: u64,
+    review_start: usize,
+    review_end: usize,
+    original_fingerprint: String,
+    original_bytes: usize,
+    original_characters: usize,
+    suggested: String,
+}
+
+fn parse_cleanup_payload(payload: &str) -> fdo::Result<CleanupPayload> {
+    if payload.len() > 256 * 1024 {
+        return Err(fdo::Error::InvalidArgs(
+            "cleanup report exceeds the bounded size".to_owned(),
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(payload)
+        .map_err(|_| fdo::Error::InvalidArgs("cleanup report is not valid JSON".to_owned()))?;
+    if value.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+        || value
+            .pointer("/source/kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("fcitx")
+    {
+        return Err(fdo::Error::InvalidArgs(
+            "cleanup report has an unsupported source or schema".to_owned(),
+        ));
+    }
+    let string = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .filter(|field| field.len() <= 64 * 1024 && !field.contains('\0'))
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                fdo::Error::InvalidArgs(format!("cleanup report field {pointer} is invalid"))
+            })
+    };
+    let number = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                fdo::Error::InvalidArgs(format!("cleanup report field {pointer} is invalid"))
+            })
+    };
+    Ok(CleanupPayload {
+        program: string("/source/program")?,
+        frontend: string("/source/frontend")?,
+        generation: number("/source/generation")?,
+        review_start: usize::try_from(number("/source/review_start")?)
+            .map_err(|_| fdo::Error::InvalidArgs("cleanup start is out of range".to_owned()))?,
+        review_end: usize::try_from(number("/source/review_end")?)
+            .map_err(|_| fdo::Error::InvalidArgs("cleanup end is out of range".to_owned()))?,
+        original_fingerprint: string("/original_fingerprint")?,
+        original_bytes: usize::try_from(number("/original_bytes")?).map_err(|_| {
+            fdo::Error::InvalidArgs("cleanup byte count is out of range".to_owned())
+        })?,
+        original_characters: usize::try_from(number("/original_characters")?).map_err(|_| {
+            fdo::Error::InvalidArgs("cleanup character count is out of range".to_owned())
+        })?,
+        suggested: string("/suggested")?,
+    })
+}
+
+struct CleanupReceipt {
+    program: String,
+    frontend: String,
+    original: String,
+    suggested: String,
+}
+
+fn parse_cleanup_receipt(payload: &str) -> fdo::Result<CleanupReceipt> {
+    if payload.len() > 32 * 1024 {
+        return Err(fdo::Error::InvalidArgs(
+            "cleanup receipt exceeds the bounded size".to_owned(),
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(payload)
+        .map_err(|_| fdo::Error::InvalidArgs("cleanup receipt is not valid JSON".to_owned()))?;
+    if value.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+        || value.get("kind").and_then(serde_json::Value::as_str) != Some("fcitx-replacement")
+    {
+        return Err(fdo::Error::InvalidArgs(
+            "cleanup receipt has an unsupported schema".to_owned(),
+        ));
+    }
+    let field = |name: &str| {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| text.len() <= 16 * 1024 && !text.contains('\0'))
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                fdo::Error::InvalidArgs(format!("cleanup receipt field {name} is invalid"))
+            })
+    };
+    Ok(CleanupReceipt {
+        program: field("program")?,
+        frontend: field("frontend")?,
+        original: field("original")?,
+        suggested: field("suggested")?,
+    })
 }
 
 const fn error_category_name(category: ErrorCategory) -> &'static str {

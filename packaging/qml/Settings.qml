@@ -102,7 +102,8 @@ ApplicationWindow {
         let count = 0
         for (let i = 0; i < state.providers.length; ++i) {
             const readiness = state.providers[i].readiness
-            if (readiness === "setup-needed" || readiness === "unavailable" || readiness === "degraded")
+            if (readiness === "setup-needed" || readiness === "unavailable"
+                    || readiness === "degraded" || readiness === "build-needed")
                 ++count
         }
         return count
@@ -114,6 +115,7 @@ ApplicationWindow {
         if (readiness === "degraded") return qsTr("最近验证失败")
         if (readiness === "unavailable") return qsTr("暂时不可用")
         if (readiness === "setup-needed") return qsTr("需要完成设置")
+        if (readiness === "build-needed") return qsTr("当前构建未包含")
         if (readiness === "demo") return qsTr("演示模式")
         return qsTr("状态未知")
     }
@@ -143,6 +145,23 @@ ApplicationWindow {
         if (highest >= 0.8)
             return qsTr("本次 daemon 会话已接近配置的软限额")
         return ""
+    }
+
+    function audioInputIndex() {
+        if (!root.state)
+            return -1
+        const configured = root.state.general.audio_device
+        for (let i = 0; i < root.state.audio_inputs.length; ++i) {
+            if (root.state.audio_inputs[i].name === configured)
+                return i
+        }
+        return 0
+    }
+
+    function selectedProviderPreset() {
+        if (!root.state || newProviderKind.currentIndex < 0)
+            return null
+        return root.state.provider_catalog[newProviderKind.currentIndex]
     }
 
     Component.onCompleted: refresh("")
@@ -326,17 +345,21 @@ ApplicationWindow {
                             }
 
                             Label { text: qsTr("录音设备") }
-                            TrackedTextField {
+                            ComboBox {
                                 id: audioDevice
                                 Layout.fillWidth: true
-                                text: root.state ? root.state.general.audio_device : ""
-                                placeholderText: qsTr("留空使用系统默认输入设备")
+                                model: root.state ? root.state.audio_inputs : []
+                                textRole: "label"
+                                valueRole: "name"
+                                currentIndex: root.audioInputIndex()
                             }
 
                             Item { Layout.preferredWidth: 1 }
                             Label {
                                 Layout.fillWidth: true
-                                text: qsTr("可填写 PipeWire 节点名或 PulseAudio source 名称；修改后会同时用于录音、校准和音频诊断。")
+                                text: audioDevice.currentIndex >= 0 && root.state
+                                    ? String(root.state.audio_inputs[audioDevice.currentIndex].description || "")
+                                    : qsTr("由 PipeWire / WirePlumber 实时提供设备列表")
                                 wrapMode: Text.Wrap
                                 opacity: 0.65
                             }
@@ -545,7 +568,7 @@ ApplicationWindow {
                             onClicked: {
                                 const payload = {
                                     default_profile: profileBox.currentText,
-                                    audio_device: audioDevice.text,
+                                    audio_device: audioDevice.currentValue || "",
                                     insertion_backend: backendBox.currentText,
                                     restore_clipboard: restoreClipboard.checked,
                                     retain_recordings: retainRecordings.checked,
@@ -595,7 +618,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.leftMargin: 22
                         Layout.rightMargin: 22
-                        text: qsTr("隐私提示：选择 OpenAI-compatible 或 Deepgram 云服务时，麦克风录音会发送给对应服务。只有配置 buffered-with-consent 时才允许将同一录音重放给 fallback Provider。")
+                        text: qsTr("隐私提示：选择豆包非官方兼容、OpenAI-compatible 或 Deepgram 云服务时，麦克风录音会发送给对应第三方服务。只有配置 buffered-with-consent 时才允许将同一录音重放给 fallback Provider。")
                         wrapMode: Text.Wrap
                         color: "#f59e0b"
                     }
@@ -642,22 +665,19 @@ ApplicationWindow {
                             ComboBox {
                                 id: newProviderKind
                                 Layout.fillWidth: true
-                                model: ["doubao-unofficial", "openai-compatible", "deepgram"]
+                                model: root.state ? root.state.provider_catalog : []
+                                textRole: "label"
+                                valueRole: "kind"
                             }
                             Button {
-                                text: newProviderKind.currentText === "doubao-unofficial"
+                                text: newProviderKind.currentValue === "doubao-unofficial"
                                     ? qsTr("使用内置兼容配置") : qsTr("填充官方默认")
                                 onClicked: {
-                                    if (newProviderKind.currentText === "deepgram") {
-                                        newProviderEndpoint.text = "https://api.deepgram.com/v1/listen"
-                                        newProviderModel.text = "nova-3"
-                                    } else if (newProviderKind.currentText === "doubao-unofficial") {
-                                        newProviderEndpoint.clear()
-                                        newProviderModel.clear()
-                                    } else {
-                                        newProviderEndpoint.text = "https://api.openai.com/v1/audio/transcriptions"
-                                        newProviderModel.text = "gpt-4o-mini-transcribe"
-                                    }
+                                    const preset = root.selectedProviderPreset()
+                                    if (!preset)
+                                        return
+                                    newProviderEndpoint.text = preset.endpoint
+                                    newProviderModel.text = preset.model
                                 }
                             }
 
@@ -665,9 +685,9 @@ ApplicationWindow {
                             TrackedTextField {
                                 id: newProviderEndpoint
                                 Layout.fillWidth: true
-                                placeholderText: newProviderKind.currentText === "doubao-unofficial"
+                                placeholderText: newProviderKind.currentValue === "doubao-unofficial"
                                     ? qsTr("由内置上游兼容配置管理") : "https://…"
-                                enabled: newProviderKind.currentText !== "doubao-unofficial"
+                                enabled: newProviderKind.currentValue !== "doubao-unofficial"
                             }
                             Item { Layout.preferredWidth: 1 }
 
@@ -675,12 +695,19 @@ ApplicationWindow {
                             TrackedTextField {
                                 id: newProviderModel
                                 Layout.fillWidth: true
-                                placeholderText: newProviderKind.currentText === "doubao-unofficial"
-                                    ? qsTr("上游豆包输入法 ASR")
-                                    : newProviderKind.currentText === "deepgram" ? "nova-3" : "gpt-4o-mini-transcribe"
-                                enabled: newProviderKind.currentText !== "doubao-unofficial"
+                                placeholderText: {
+                                    const preset = root.selectedProviderPreset()
+                                    if (!preset)
+                                        return ""
+                                    return preset.managed ? qsTr("由内置上游兼容配置管理") : preset.model
+                                }
+                                enabled: newProviderKind.currentValue !== "doubao-unofficial"
                             }
-                            Item { Layout.preferredWidth: 1 }
+                            Button {
+                                text: qsTr("查看接口文档")
+                                enabled: root.selectedProviderPreset() !== null
+                                onClicked: Qt.openUrlExternally(root.selectedProviderPreset().documentation)
+                            }
 
                             Label { text: qsTr("语言") }
                             TrackedTextField {
@@ -697,7 +724,7 @@ ApplicationWindow {
                             Item { Layout.preferredWidth: 1 }
                             Label {
                                 Layout.fillWidth: true
-                                text: newProviderKind.currentText === "doubao-unofficial"
+                                text: newProviderKind.currentValue === "doubao-unofficial"
                                     ? qsTr("创建后在下方初始化匿名设备凭据。该接口非官方且可能随上游变化。")
                                     : qsTr("创建后在下方安全保存 API 密钥。音频只有在实际使用该配置时才会上传。")
                                 wrapMode: Text.Wrap
@@ -707,14 +734,14 @@ ApplicationWindow {
                                 text: qsTr("创建 Provider 和配置")
                                 highlighted: true
                                 enabled: newProviderId.acceptableInput
-                                    && (newProviderKind.currentText === "doubao-unofficial"
+                                    && (newProviderKind.currentValue === "doubao-unofficial"
                                         || (newProviderEndpoint.text.trim().length > 0
                                             && newProviderModel.text.trim().length > 0))
                                     && newProviderLanguage.text.trim().length > 0
                                 onClicked: {
                                     const payload = {
                                         id: newProviderId.text.trim(),
-                                        kind: newProviderKind.currentText,
+                                        kind: newProviderKind.currentValue,
                                         endpoint: newProviderEndpoint.text.trim(),
                                         model: newProviderModel.text.trim(),
                                         language: newProviderLanguage.text.trim(),
@@ -768,6 +795,13 @@ ApplicationWindow {
                                         text: root.readinessText(modelData.readiness)
                                         color: root.readinessColor(modelData.readiness)
                                     }
+                                }
+                                Label {
+                                    visible: modelData.implementation_available === false
+                                    text: qsTr("配置已安全读取，但当前程序未编译 doubao-unofficial 功能；该 Provider 不会被调用。")
+                                    color: "#ef4444"
+                                    wrapMode: Text.Wrap
+                                    Layout.fillWidth: true
                                 }
                                 Label {
                                     visible: modelData.kind === "command"
@@ -911,6 +945,7 @@ ApplicationWindow {
                                             Item { Layout.fillWidth: true }
                                             Button {
                                                 visible: modelData.secret_state !== "configured"
+                                                    && modelData.implementation_available !== false
                                                 text: qsTr("自动初始化兼容凭据")
                                                 onClicked: {
                                                     root.messageError = false

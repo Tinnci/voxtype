@@ -96,6 +96,25 @@ impl<'a> Client<'a> {
         self.proxy.call("CheckContextGrammar", &())
     }
 
+    /// Applies a verified focused-context cleanup report atomically through Fcitx.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error when the report, focus, generation, or source text
+    /// no longer matches.
+    pub fn apply_context_cleanup(&self, report: &str) -> zbus::Result<String> {
+        self.proxy.call("ApplyContextCleanup", &(report))
+    }
+
+    /// Reverts a cleanup receipt only while its inserted text remains at the cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a D-Bus error when focus or surrounding text changed.
+    pub fn undo_context_cleanup(&self, receipt: &str) -> zbus::Result<String> {
+        self.proxy.call("UndoContextCleanup", &(receipt))
+    }
+
     /// Clears the in-memory recent transcript.
     ///
     /// # Errors

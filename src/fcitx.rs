@@ -31,15 +31,22 @@ pub struct FcitxContext {
 }
 
 impl FcitxContext {
-    /// Returns the selected text, or up to 1200 characters before the cursor.
+    /// Returns the character-addressed review span in the bounded context.
     #[must_use]
-    pub fn review_text(&self) -> String {
+    pub fn review_span(&self) -> (usize, usize) {
         let start = self.cursor.min(self.anchor);
         let end = self.cursor.max(self.anchor);
         if start != end {
-            return slice_characters(&self.text, start, end);
+            return (start, end);
         }
-        slice_characters(&self.text, self.cursor.saturating_sub(1_200), self.cursor)
+        (self.cursor.saturating_sub(1_200), self.cursor)
+    }
+
+    /// Returns the selected text, or up to 1200 characters before the cursor.
+    #[must_use]
+    pub fn review_text(&self) -> String {
+        let (start, end) = self.review_span();
+        slice_characters(&self.text, start, end)
     }
 }
 
@@ -145,6 +152,55 @@ impl FcitxBridge {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Replaces a verified character span in the currently focused context.
+    ///
+    /// The addon rechecks the context generation and exact source text on its
+    /// event-loop turn before issuing Fcitx delete-and-commit operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the focus, generation, source text, or requested
+    /// range changed after the caller captured the context.
+    pub fn replace(
+        self,
+        context: &FcitxContext,
+        start: usize,
+        end: usize,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<(), VoxError> {
+        if start >= end
+            || end > context.text.chars().count()
+            || slice_characters(&context.text, start, end) != expected
+            || expected.contains('\0')
+            || replacement.contains('\0')
+        {
+            return Err(VoxError::new(
+                ErrorCategory::InvalidArgument,
+                "fcitx.invalid_replacement",
+                "replacement range does not match the captured Fcitx context",
+            ));
+        }
+        let request_id = format!(
+            "{}-{}",
+            std::process::id(),
+            CLIENT_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let generation = context.generation.to_string();
+        let start = start.to_string();
+        let end = end.to_string();
+        let response = request_with_retry(&[
+            b"REPLACE2",
+            request_id.as_bytes(),
+            generation.as_bytes(),
+            start.as_bytes(),
+            end.as_bytes(),
+            expected.as_bytes(),
+            replacement.as_bytes(),
+        ])?;
+        expect_dispatched_for(&response, &request_id)
     }
 
     /// Clears any armed input context for the session.
@@ -343,7 +399,9 @@ fn expect_ok(response: &[u8]) -> Result<(), VoxError> {
         .unwrap_or("bridge-error");
     let category = match code {
         "secure-context" => ErrorCategory::Permission,
-        "no-focused-context" | "focus-changed" => ErrorCategory::InvalidState,
+        "no-focused-context" | "focus-changed" | "generation-changed" | "source-changed" => {
+            ErrorCategory::InvalidState
+        }
         "session-mismatch" | "empty-text" => ErrorCategory::Protocol,
         _ => ErrorCategory::Unavailable,
     };
@@ -524,7 +582,28 @@ mod tests {
             truncated: false,
             text: "前文内容后文".to_owned(),
         };
+        assert_eq!(context.review_span(), (0, 4));
         assert_eq!(context.review_text(), "前文内容");
+    }
+
+    #[test]
+    fn replacement_requires_the_exact_captured_span() {
+        let context = FcitxContext {
+            target: FcitxTarget {
+                program: "kate".to_owned(),
+                frontend: "wayland".to_owned(),
+            },
+            generation: 1,
+            cursor: 3,
+            anchor: 1,
+            capabilities: vec!["surrounding-text".to_owned()],
+            truncated: false,
+            text: "abc".to_owned(),
+        };
+        let error = FcitxBridge
+            .replace(&context, 1, 3, "wrong", "ok")
+            .expect_err("stale source must fail before transport");
+        assert_eq!(error.code(), "fcitx.invalid_replacement");
     }
 
     #[test]

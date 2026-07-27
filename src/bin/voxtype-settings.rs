@@ -22,12 +22,13 @@ use voxtype_core::ProviderId;
 use voxtype_provider_common::CancellationToken;
 #[cfg(feature = "doubao-unofficial")]
 use voxtype_provider_doubao::{
-    managed::ManagedCredentialBundle,
-    tinnci_compat::{UPSTREAM_REPOSITORY, UPSTREAM_REVISION, provision_managed_bundle},
+    managed::ManagedCredentialBundle, tinnci_compat::provision_managed_bundle,
 };
 use zbus::blocking::Connection;
 
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
+const UPSTREAM_REPOSITORY: &str = "https://github.com/Tinnci/doubao-asr-for-ha";
+const UPSTREAM_REVISION: &str = "ca4ed3ff8241d2824e21c90d7df3f1a463da6ed5";
 
 fn main() {
     if let Err(error) = run() {
@@ -289,6 +290,7 @@ fn calibration_phase(title: &str, body: &str, timeout_millis: u32) {
 fn settings_state() -> io::Result<Value> {
     let config = Config::load_or_create().map_err(domain_io)?;
     let onboarding_needed = needs_provider_onboarding(&config);
+    let audio_inputs = pipewire_audio_inputs(&config.audio.device);
     let usage = Connection::session()
         .and_then(|connection| {
             let client = Client::connect(&connection)?;
@@ -326,6 +328,11 @@ fn settings_state() -> io::Result<Value> {
         "config_path": config_path().map_err(domain_io)?,
         "usage_scope": usage.get("scope").and_then(Value::as_str).unwrap_or("unavailable"),
         "onboarding_needed": onboarding_needed,
+        "provider_catalog": provider_catalog(),
+        "audio_inputs": audio_inputs,
+        "build": {
+            "doubao_unofficial": cfg!(feature = "doubao-unofficial"),
+        },
         "general": {
             "default_profile": config.default_profile,
             "profiles": config.profiles.keys().collect::<Vec<_>>(),
@@ -342,6 +349,130 @@ fn settings_state() -> io::Result<Value> {
         },
         "providers": providers,
     }))
+}
+
+fn provider_catalog() -> Value {
+    json!([
+        {
+            "kind": "doubao-unofficial",
+            "label": "豆包输入法 ASR（Tier 1 非官方兼容）",
+            "endpoint": "",
+            "model": "",
+            "documentation": UPSTREAM_REPOSITORY,
+            "source": format!("Tinnci/doubao-asr-for-ha @ {}", UPSTREAM_REVISION),
+            "managed": true,
+            "implementation_available": cfg!(feature = "doubao-unofficial"),
+        },
+        {
+            "kind": "openai-compatible",
+            "label": "OpenAI Audio Transcriptions",
+            "endpoint": "https://api.openai.com/v1/audio/transcriptions",
+            "model": "gpt-4o-mini-transcribe",
+            "documentation": "https://platform.openai.com/docs/api-reference/audio/createTranscription",
+            "source": "OpenAI API Reference",
+            "managed": false,
+            "implementation_available": true,
+        },
+        {
+            "kind": "deepgram",
+            "label": "Deepgram Pre-recorded Audio",
+            "endpoint": "https://api.deepgram.com/v1/listen",
+            "model": "nova-3",
+            "documentation": "https://developers.deepgram.com/docs/pre-recorded-audio",
+            "source": "Deepgram Developers",
+            "managed": false,
+            "implementation_available": true,
+        }
+    ])
+}
+
+fn pipewire_audio_inputs(configured: &str) -> Vec<Value> {
+    let default_name = pipewire_default_source();
+    let mut inputs = vec![json!({
+        "name": "",
+        "label": "系统默认输入设备",
+        "description": default_name.as_deref().unwrap_or("由 WirePlumber 选择"),
+        "is_default": true,
+        "available": true,
+    })];
+    let Ok(output) = Command::new("pw-dump").arg("Node").output() else {
+        append_configured_audio_input(&mut inputs, configured);
+        return inputs;
+    };
+    if !output.status.success() || output.stdout.len() > 8 * 1024 * 1024 {
+        append_configured_audio_input(&mut inputs, configured);
+        return inputs;
+    }
+    let Ok(objects) = serde_json::from_slice::<Vec<Value>>(&output.stdout) else {
+        append_configured_audio_input(&mut inputs, configured);
+        return inputs;
+    };
+    let mut discovered = objects
+        .into_iter()
+        .filter_map(|object| {
+            let props = object.pointer("/info/props")?.as_object()?;
+            (props.get("media.class")?.as_str()? == "Audio/Source").then_some(())?;
+            let name = props.get("node.name")?.as_str()?.trim();
+            if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+                return None;
+            }
+            let description = ["node.description", "device.description", "node.nick"]
+                .into_iter()
+                .find_map(|key| props.get(key).and_then(Value::as_str))
+                .unwrap_or(name);
+            Some(json!({
+                "name": name,
+                "label": description,
+                "description": name,
+                "is_default": default_name.as_deref() == Some(name),
+                "available": true,
+            }))
+        })
+        .collect::<Vec<_>>();
+    discovered.sort_by(|left, right| {
+        right["is_default"]
+            .as_bool()
+            .cmp(&left["is_default"].as_bool())
+            .then_with(|| left["label"].as_str().cmp(&right["label"].as_str()))
+    });
+    inputs.extend(discovered);
+    append_configured_audio_input(&mut inputs, configured);
+    inputs
+}
+
+fn pipewire_default_source() -> Option<String> {
+    let output = Command::new("wpctl")
+        .args(["inspect", "@DEFAULT_AUDIO_SOURCE@"])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() > 256 * 1024 {
+        return None;
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let (_, value) = line.trim_start().split_once("node.name = ")?;
+            Some(value.trim().trim_matches('"').to_owned())
+        })
+        .filter(|name| !name.is_empty())
+}
+
+fn append_configured_audio_input(inputs: &mut Vec<Value>, configured: &str) {
+    if configured.is_empty()
+        || inputs
+            .iter()
+            .any(|input| input["name"].as_str() == Some(configured))
+    {
+        return;
+    }
+    inputs.push(json!({
+        "name": configured,
+        "label": format!("已配置：{configured}"),
+        "description": "当前 PipeWire 图中未发现该节点",
+        "is_default": false,
+        "available": false,
+    }));
 }
 
 fn provider_state(
@@ -386,7 +517,6 @@ fn provider_state(
                 json!(timeout_seconds),
                 json!(smart_format),
             ),
-            #[cfg(feature = "doubao-unofficial")]
             ProviderConfig::DoubaoUnofficial {
                 secret,
                 phase_timeout_seconds,
@@ -431,6 +561,7 @@ fn provider_state(
         "compatibility_source": compatibility_source(kind),
         "compatibility_revision": compatibility_revision(kind),
         "credential_mode": if kind == "doubao-unofficial" { "managed-bootstrap" } else if secret_ref.is_empty() { "none" } else { "api-key" },
+        "implementation_available": kind != "doubao-unofficial" || cfg!(feature = "doubao-unofficial"),
         "usage_capabilities": {
             "requests": true,
             "audio": true,
@@ -450,28 +581,25 @@ fn provider_health_for(status: &Value, provider_id: &str) -> Value {
 }
 
 fn compatibility_source(kind: &str) -> &'static str {
-    #[cfg(feature = "doubao-unofficial")]
     if kind == "doubao-unofficial" {
         return UPSTREAM_REPOSITORY;
     }
-    #[cfg(not(feature = "doubao-unofficial"))]
-    let _ = kind;
     ""
 }
 
 fn compatibility_revision(kind: &str) -> &'static str {
-    #[cfg(feature = "doubao-unofficial")]
     if kind == "doubao-unofficial" {
         return UPSTREAM_REVISION;
     }
-    #[cfg(not(feature = "doubao-unofficial"))]
-    let _ = kind;
     ""
 }
 
 fn provider_readiness(kind: &str, secret_state: &str, health: &Value) -> &'static str {
     if kind == "mock" {
         return "demo";
+    }
+    if kind == "doubao-unofficial" && !cfg!(feature = "doubao-unofficial") {
+        return "build-needed";
     }
     if matches!(secret_state, "missing" | "unavailable") {
         return "setup-needed";
@@ -676,7 +804,6 @@ fn save_provider(provider: &str, body: &[u8]) -> io::Result<Response> {
                 *smart_format = value;
             }
         }
-        #[cfg(feature = "doubao-unofficial")]
         ProviderConfig::DoubaoUnofficial { .. } => {
             return Ok(Response::error(
                 400,
@@ -729,9 +856,8 @@ fn save_secret(name: &str, body: &[u8]) -> io::Result<Response> {
     let config = Config::load_or_create().map_err(domain_io)?;
     let known = config.providers.values().any(|provider| match provider {
         ProviderConfig::OpenaiCompatible { secret, .. }
-        | ProviderConfig::Deepgram { secret, .. } => secret == name,
-        #[cfg(feature = "doubao-unofficial")]
-        ProviderConfig::DoubaoUnofficial { secret, .. } => secret == name,
+        | ProviderConfig::Deepgram { secret, .. }
+        | ProviderConfig::DoubaoUnofficial { secret, .. } => secret == name,
         ProviderConfig::Mock { .. } | ProviderConfig::Command { .. } => false,
     });
     if !known {
@@ -1010,7 +1136,6 @@ mod tests {
         assert_eq!(json_pointer_escape("a/b~c"), "a~1b~0c");
     }
 
-    #[cfg(feature = "doubao-unofficial")]
     #[test]
     fn exposes_doubao_as_managed_unofficial_without_token_usage() {
         let provider = ProviderConfig::DoubaoUnofficial {
